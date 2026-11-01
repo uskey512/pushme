@@ -286,11 +286,40 @@ jobs:
 | `attach` | | 添付するファイルのパス |
 | `dry-run` | `false` | 送信せず、送る内容をログに出す |
 | `fail-on-error` | `false` | 通知に失敗したらステップを失敗させる |
+| `backend` | `ntfy` | 送信先。`ntfy` または `pushover` |
+| `pushover-token` | | Pushover の API Token |
+| `pushover-user` | | Pushover の User Key |
 
 | 出力 | 説明 |
 |---|---|
 | `status` | `sent` / `dry-run` / `failed` のどれか |
 | `dry-run-output` | `dry-run` のときに表示した送信内容（トピック名とトークンは伏せ字） |
+
+## Pushover で受け取る
+
+ntfy の代わりに [Pushover](https://pushover.net/)（iOS / Android 用の有料アプリ）でも受け取れます。
+
+1. Pushover のアカウントを作り、ダッシュボードに表示される User Key を控える
+2. https://pushover.net/apps/build でアプリケーションを作り、API Token を控える
+3. 設定ファイルに次の行を書く（`pushme init` は ntfy 用なので、Pushover だけを使う場合は `~/.config/pushme/config` を手で作り、`chmod 600` にする）
+
+   ```sh
+   PUSHME_BACKEND=pushover
+   PUSHME_PUSHOVER_TOKEN=<API Token>
+   PUSHME_PUSHOVER_USER=<User Key>
+   ```
+
+4. `pushme doctor` でキーを確認する（Pushover の `users/validate.json` を使うので、通知は送りません）
+
+ntfy との違いは次のとおりです。
+
+- 優先度は 1→-2、2→-1、3→0、4 と 5→1 に置き換えます。緊急（2）は確認するまで鳴り続けるため、自動では使いません
+- Pushover にはタグがありません。`white_check_mark` ✅、`x` ❌、`question` ❓、`warning` ⚠️ などの主な絵文字のタグは、タイトルの先頭に絵文字として付けます。それ以外のタグは送らず、タイトルの末尾に ` @ホスト名` を付けます
+- タイトルは 250 バイト、本文は 1,024 バイトに切り詰めます
+- `--markdown` と `--filename` は使いません。`--attach` は 5 MiB まで（それより大きいと本文だけ送り、警告を出します）。`--attach-url` は本文の末尾に URL を足します
+- トークンとユーザーキーは、トピック名と同じく伏せ字にし、`ps` にも出しません
+
+GitHub Actions では `backend: pushover` と、`pushover-token: ${{ secrets.PUSHOVER_TOKEN }}`・`pushover-user: ${{ secrets.PUSHOVER_USER }}` を指定します。
 
 ## 設定
 
@@ -308,7 +337,7 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 | キー | 既定値 | 説明 |
 |---|---|---|
-| `PUSHME_BACKEND` | `ntfy` | 送信先 |
+| `PUSHME_BACKEND` | `ntfy` | 送信先。`ntfy` または `pushover` |
 | `PUSHME_NTFY_URL` | `https://ntfy.sh` | ntfy サーバーの URL（末尾の `/` は取り除く） |
 | `PUSHME_NTFY_TOPIC` | なし（必須） | トピック名。英数字・`-`・`_` の 1〜64 文字 |
 | `PUSHME_NTFY_TOKEN` | なし | アクセストークン。設定すると `Authorization: Bearer` ヘッダを付ける（自前の ntfy サーバー向け） |
@@ -317,6 +346,9 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_NTFY_ATTACH_MAX` | `2097152` | 添付できるファイルの上限（バイト） |
 | `PUSHME_CLAUDE_MIN_SECONDS` | `30` | Claude Code の返答がこの秒数以上かかったときだけ「完了」を通知する |
 | `PUSHME_CLAUDE_INCLUDE_MESSAGE` | `1` | `0` にすると「完了」の通知に返答の先頭を載せない |
+| `PUSHME_PUSHOVER_TOKEN` | なし | Pushover の API Token（`PUSHME_BACKEND=pushover` のとき必須） |
+| `PUSHME_PUSHOVER_USER` | なし | Pushover の User Key（`PUSHME_BACKEND=pushover` のとき必須） |
+| `PUSHME_PUSHOVER_DEVICE` | なし | 送る端末の名前（カンマ区切りで複数）。なければすべての端末 |
 | `PUSHME_CURL` | `curl` | 使う curl コマンド。**環境変数でだけ**指定できる（設定ファイルに書いても無視する） |
 
 設定ファイルは `0600`、それを置くディレクトリは `0700` にしてください。これより緩いと、送信時に警告を出します（送信は続けます）。設定ファイルを置かない環境では、環境変数 `PUSHME_NTFY_TOPIC` だけでも動きます。

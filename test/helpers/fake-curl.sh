@@ -6,12 +6,14 @@
 #   $FAKE_CURL_DIR/N.headers  header values, unescaped, one per line
 #   $FAKE_CURL_DIR/N.body     data-raw value, unescaped
 #   $FAKE_CURL_DIR/N.upload   copy of the upload-file
-#   $FAKE_CURL_DIR/N.method   GET, POST (data-raw) or PUT (upload-file)
+#   $FAKE_CURL_DIR/N.method   GET, POST (data-raw, form) or PUT (upload-file)
+#   $FAKE_CURL_DIR/N.form-NAME  value of form-string NAME, or a copy of the
+#                             file of form NAME=@"path" (path in N.form-NAME.path)
 # and $FAKE_CURL_DIR/calls holds the number of calls so far.
 #
 # Outcome knobs:
 #   FAKE_CURL_EXITS   curl exit codes for call 1, 2, ... (the last one repeats); default 0
-#   FAKE_CURL_STATUS  HTTP status; 400 or above fails like curl --fail (exit 22)
+#   FAKE_CURL_STATUS  HTTP status; with --fail, 400 or above exits 22 like curl
 #   FAKE_CURL_BODY    response body printed when --output is not given
 #   FAKE_CURL_STDERR  replaces the error message printed on failure
 
@@ -64,9 +66,10 @@ unescape() {
   REPLY=$out$s
 }
 
-url='' output='' write_out='' config=''
+url='' output='' write_out='' config='' fail=0
 while [ $# -gt 0 ]; do
   case $1 in
+    -f | --fail) fail=1 ;;
     -o | --output) output=$2 && shift ;;
     -w | --write-out) write_out=$2 && shift ;;
     -K | --config) config=$2 && shift ;;
@@ -97,6 +100,24 @@ if [ "$config" = - ]; then
         method=PUT
         cp "$REPLY" "$dir/$n.upload" || exit 26
         ;;
+      form-string)
+        method=POST
+        printf '%s' "${REPLY#*=}" >"$dir/$n.form-${REPLY%%=*}"
+        ;;
+      form)
+        method=POST
+        name=${REPLY%%=*}
+        file=${REPLY#*=@}
+        case $file in
+          \"*\")
+            file=${file:1:${#file}-2}
+            file=${file//\\\"/\"}
+            file=${file//\\\\/\\}
+            ;;
+        esac
+        printf '%s\n' "$file" >"$dir/$n.form-$name.path"
+        cp "$file" "$dir/$n.form-$name" || exit 26
+        ;;
     esac
   done <"$dir/$n.config"
 fi
@@ -116,7 +137,7 @@ status=${FAKE_CURL_STATUS:-200}
 message=''
 case $code in
   0)
-    if [ "$status" -ge 400 ]; then
+    if [ "$status" -ge 400 ] && [ "$fail" = 1 ]; then
       code=22
       message="curl: (22) The requested URL returned error: $status"
     fi

@@ -9,6 +9,7 @@ setup_action() {
   export INPUT_MESSAGE=hello INPUT_TOPIC=$TEST_TOPIC INPUT_TITLE='' INPUT_PRIORITY=high
   export INPUT_TAGS='' INPUT_CLICK=$RUN_URL INPUT_SERVER=https://ntfy.sh INPUT_TOKEN=''
   export INPUT_MARKDOWN=false INPUT_ATTACH='' INPUT_DRY_RUN=false INPUT_FAIL_ON_ERROR=false
+  export INPUT_BACKEND=ntfy INPUT_PUSHOVER_TOKEN='' INPUT_PUSHOVER_USER=''
   export PUSHME_HOSTNAME=owner/repo GITHUB_ACTION_PATH=$PUSHME_ROOT
   export GITHUB_OUTPUT=$BATS_TEST_TMPDIR/github-output RUNNER_TEMP=$BATS_TEST_TMPDIR
   : >"$GITHUB_OUTPUT"
@@ -156,6 +157,22 @@ output_value() {
   run_action
   [ "$status" -eq 0 ]
   [[ $output == *"::warning title=pushme::通知を送れませんでした: 送信に失敗しました: curl: (6) 100%25 failed"* ]] || false
+}
+
+@test "action: backend pushover sends with the Pushover keys, masked" {
+  setup_action
+  local token=atesttokentesttokentesttokenab user=usertestusertestusertestuserab
+  export INPUT_BACKEND=pushover INPUT_PUSHOVER_TOKEN=$token INPUT_PUSHOVER_USER=$user
+  export INPUT_TOPIC='' INPUT_TITLE=Deploy INPUT_TAGS=white_check_mark
+  run_action
+  [ "$status" -eq 0 ]
+  [ "$(cat "$(sent url)")" = "https://api.pushover.net/1/messages.json" ]
+  [ "$(cat "$(sent form-user)")" = "$user" ]
+  [ "$(cat "$(sent form-title)")" = "✅ Deploy @owner/repo" ]
+  [ "$(cat "$(sent form-priority)")" = 1 ]
+  [ "$(cat "$(sent form-url)")" = "$RUN_URL" ]
+  [[ $output == *"::add-mask::$token"* ]] || false
+  [[ $output == *"::add-mask::$user"* ]] || false
 }
 
 @test "action: works without GITHUB_OUTPUT" {

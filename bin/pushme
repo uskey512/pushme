@@ -24,6 +24,12 @@ NTFY_TITLE_MAX=1000
 NTFY_TAGS_MAX=512
 # The attachment size limit of the ntfy.sh free tier.
 NTFY_ATTACH_MAX_DEFAULT=2097152
+PUSHOVER_API=https://api.pushover.net/1
+# Pushover's limits are in characters; cutting to as many bytes keeps the
+# character count under them too.
+PUSHOVER_MESSAGE_MAX=1024
+PUSHOVER_TITLE_MAX=250
+PUSHOVER_ATTACH_MAX=5242880
 TOPIC_RULE='英数字・「-」・「_」の 1〜64 文字'
 
 usage() {
@@ -122,7 +128,7 @@ mask() {
 
 redact() {
   local s=$1 secret masked
-  for secret in "$cfg_ntfy_topic" "$cfg_ntfy_token"; do
+  for secret in "$cfg_ntfy_topic" "$cfg_ntfy_token" "$cfg_pushover_token" "$cfg_pushover_user"; do
     [ -n "$secret" ] || continue
     masked=$(mask "$secret")
     s=${s//"$secret"/"$masked"}
@@ -311,6 +317,9 @@ cfg_reset() {
   cfg_ntfy_attach_max=
   cfg_claude_min_seconds=
   cfg_claude_include_message=
+  cfg_pushover_token=
+  cfg_pushover_user=
+  cfg_pushover_device=
   cfg_file=
   cfg_file_state=missing
   cfg_unknown=()
@@ -345,6 +354,9 @@ config_read_file() {
       PUSHME_NTFY_ATTACH_MAX) cfg_ntfy_attach_max=$value ;;
       PUSHME_CLAUDE_MIN_SECONDS) cfg_claude_min_seconds=$value ;;
       PUSHME_CLAUDE_INCLUDE_MESSAGE) cfg_claude_include_message=$value ;;
+      PUSHME_PUSHOVER_TOKEN) cfg_pushover_token=$value ;;
+      PUSHME_PUSHOVER_USER) cfg_pushover_user=$value ;;
+      PUSHME_PUSHOVER_DEVICE) cfg_pushover_device=$value ;;
       *) cfg_unknown+=("$lineno:$key") ;;
     esac
   done <"$1"
@@ -360,6 +372,9 @@ config_read_env() {
   if [ -n "${PUSHME_NTFY_ATTACH_MAX:-}" ]; then cfg_ntfy_attach_max=$PUSHME_NTFY_ATTACH_MAX; fi
   if [ -n "${PUSHME_CLAUDE_MIN_SECONDS:-}" ]; then cfg_claude_min_seconds=$PUSHME_CLAUDE_MIN_SECONDS; fi
   if [ -n "${PUSHME_CLAUDE_INCLUDE_MESSAGE:-}" ]; then cfg_claude_include_message=$PUSHME_CLAUDE_INCLUDE_MESSAGE; fi
+  if [ -n "${PUSHME_PUSHOVER_TOKEN:-}" ]; then cfg_pushover_token=$PUSHME_PUSHOVER_TOKEN; fi
+  if [ -n "${PUSHME_PUSHOVER_USER:-}" ]; then cfg_pushover_user=$PUSHME_PUSHOVER_USER; fi
+  if [ -n "${PUSHME_PUSHOVER_DEVICE:-}" ]; then cfg_pushover_device=$PUSHME_PUSHOVER_DEVICE; fi
   # Environment only: the config file must not choose a program to execute.
   if [ -n "${PUSHME_CURL:-}" ]; then cfg_curl=$PUSHME_CURL; fi
 }
@@ -421,7 +436,7 @@ config_check_common() {
       ;;
   esac
   if [ "$(type -t "backend_${cfg_backend}_send")" != function ]; then
-    problem="PUSHME_BACKEND=$cfg_backend には対応していません（使えるのは ntfy）"
+    problem="PUSHME_BACKEND=$cfg_backend には対応していません（使えるのは ntfy と pushover）"
     return 1
   fi
   case $cfg_timeout in
@@ -472,48 +487,60 @@ curl_conf_header() {
   curl_conf_add header "$1: $REPLY"
 }
 
-# Sends the request in $curl_conf. Returns 0 when the server accepted it.
+# Sends the request in $curl_conf and sets curl_status (000 without an HTTP
+# answer), curl_rc and curl_response. Returns 0 for a 2xx answer. With
+# curl_keep_body=1 the response body stays in curl_response (and --fail is
+# left out) so that a backend can quote the server's error message.
 curl_send_conf() {
-  local marker=__PUSHME_HTTP_STATUS__ attempt=1 res rc status detail
-  if ! command -v "$cfg_curl" >/dev/null 2>&1; then
-    err "curl が見つかりません（$cfg_curl）"
-    return 1
+  local marker=__PUSHME_HTTP_STATUS__ attempt=1 args
+  curl_status=000
+  curl_rc=127
+  curl_response="curl が見つかりません（$cfg_curl）"
+  command -v "$cfg_curl" >/dev/null 2>&1 || return 1
+  args=(--silent --show-error --connect-timeout 3 --max-time "$cfg_timeout")
+  if [ "${curl_keep_body:-0}" != 1 ]; then
+    args+=(--fail --output /dev/null)
   fi
+  args+=(--write-out "$marker%{http_code}" --config -)
   while :; do
-    res=$(printf '%s' "$curl_conf" | "$cfg_curl" --silent --show-error --fail \
-      --connect-timeout 3 --max-time "$cfg_timeout" \
-      --output /dev/null --write-out "$marker%{http_code}" --config - 2>&1)
-    rc=$?
+    curl_response=$(printf '%s' "$curl_conf" | "$cfg_curl" "${args[@]}" 2>&1)
+    curl_rc=$?
     # Only a refused connection is retried: the request never reached the
     # server, so it cannot be delivered twice. HTTP 429 in particular is not
     # retried, since ntfy.sh may ban clients that keep exceeding its limits.
-    if [ "$rc" -eq 7 ] && [ "$attempt" -lt 2 ]; then
+    if [ "$curl_rc" -eq 7 ] && [ "$attempt" -lt 2 ]; then
       attempt=$((attempt + 1))
       sleep 1
       continue
     fi
     break
   done
-  status=${res##*"$marker"}
-  status=${status:0:3}
-  case $status in
-    [0-9][0-9][0-9]) res=${res/"$marker$status"/} ;;
-    *) status=000 ;;
+  curl_status=${curl_response##*"$marker"}
+  curl_status=${curl_status:0:3}
+  case $curl_status in
+    [0-9][0-9][0-9]) curl_response=${curl_response/"$marker$curl_status"/} ;;
+    *) curl_status=000 ;;
   esac
-  if [ "$rc" -eq 0 ]; then
-    case $status in
+  if [ "$curl_rc" -eq 0 ]; then
+    case $curl_status in
       2??) return 0 ;;
     esac
   fi
-  res=$(trim "$(printf '%s' "$res" | tr '\r\n' '  ')")
-  case $status in
-    429) detail="HTTP 429（ntfy のレート制限に達しました。再試行はしません）" ;;
-    3??) detail="HTTP $status（リダイレクト先には送りません。PUSHME_NTFY_URL を確認してください）" ;;
-    [45]??) detail="HTTP $status" ;;
-    *) detail=${res:-"curl が終了コード $rc で失敗しました"} ;;
+  return 1
+}
+
+# Reports a failed curl_send_conf. $1 is an optional detail from the backend,
+# such as the server's own explanation.
+curl_report_failure() {
+  local res detail
+  res=$(trim "$(printf '%s' "$curl_response" | tr '\r\n' '  ')")
+  case $curl_status in
+    429) detail="HTTP 429（${cfg_backend} のレート制限に達しました。再試行はしません）" ;;
+    3??) detail="HTTP ${curl_status}（リダイレクト先には送りません。送信先の URL を確認してください）" ;;
+    [45]??) detail="HTTP ${curl_status}${1:+（${1}）}" ;;
+    *) detail=${res:-"curl が終了コード ${curl_rc} で失敗しました"} ;;
   esac
   err "送信に失敗しました: $(redact "$detail")"
-  return 1
 }
 
 # --- ntfy backend ------------------------------------------------------------
@@ -641,7 +668,11 @@ backend_ntfy_send() {
     # data-raw: a body starting with "@" must not be read as a file name.
     curl_conf_add data-raw "$body"
   fi
-  curl_send_conf
+  curl_keep_body=0
+  curl_send_conf || {
+    curl_report_failure
+    return 1
+  }
 }
 
 backend_ntfy_doctor() {
@@ -686,6 +717,196 @@ backend_ntfy_doctor() {
     0:*) doctor_report NG "疎通: $cfg_ntfy_url/v1/health が healthy を返しませんでした" ;;
     *) doctor_report NG "疎通: $cfg_ntfy_url/v1/health に接続できません: $(trim "$(printf '%s' "$res" | tr '\r\n' '  ')")" ;;
   esac
+}
+
+# --- Pushover backend ----------------------------------------------------------
+
+backend_pushover_validate() {
+  if [ -z "$cfg_pushover_token" ] || [ -z "$cfg_pushover_user" ]; then
+    problem="PUSHME_PUSHOVER_TOKEN と PUSHME_PUSHOVER_USER を設定してください"
+    return 1
+  fi
+  case $cfg_pushover_token$cfg_pushover_user in
+    *[!A-Za-z0-9]*)
+      problem="PUSHME_PUSHOVER_TOKEN か PUSHME_PUSHOVER_USER の形式が不正です（英数字だけ）"
+      return 1
+      ;;
+  esac
+  case $cfg_pushover_device in
+    *[!A-Za-z0-9_,-]*)
+      problem="PUSHME_PUSHOVER_DEVICE の形式が不正です（英数字・「_」・「-」、複数ならカンマ区切り）"
+      return 1
+      ;;
+  esac
+}
+
+# Pushover has no tags, so the common ntfy emoji tags become emoji in front
+# of the title.
+pushover_emoji() {
+  case $1 in
+    white_check_mark) REPLY='✅' ;;
+    heavy_check_mark) REPLY='✔️' ;;
+    x) REPLY='❌' ;;
+    question) REPLY='❓' ;;
+    warning) REPLY='⚠️' ;;
+    rotating_light) REPLY='🚨' ;;
+    no_entry) REPLY='⛔' ;;
+    tada) REPLY='🎉' ;;
+    rocket) REPLY='🚀' ;;
+    fire) REPLY='🔥' ;;
+    bell) REPLY='🔔' ;;
+    hourglass) REPLY='⌛' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Pulls the "errors" strings out of a Pushover error response into one line.
+pushover_errors() {
+  local s=$1 separator='","' dq='"'
+  case $s in
+    *'"errors":['*) ;;
+    *) return 0 ;;
+  esac
+  s=${s#*'"errors":['}
+  s=${s%%]*}
+  s=${s//"$separator"/"; "}
+  s=${s//"$dq"/}
+  printf '%s' "$s"
+}
+
+# Makes a curl -F file value; inside its quotes only \ and " need escaping.
+pushover_form_file() {
+  local path=$1 bs=\\ dq='"'
+  path=${path//"$bs"/"$bs$bs"}
+  path=${path//"$dq"/"$bs$dq"}
+  REPLY="$2=@\"${path}\""
+}
+
+pushover_add_key_fields() {
+  curl_conf_add form-string "token=${cfg_pushover_token}"
+  curl_conf_add form-string "user=${cfg_pushover_user}"
+  if [ -n "$cfg_pushover_device" ]; then
+    curl_conf_add form-string "device=${cfg_pushover_device}"
+  fi
+}
+
+backend_pushover_send() {
+  local emoji='' suffix='' title='' body=$msg_body tail='' priority='' attach=$msg_attach
+  local size=0 note rest tag budget nl=$'\n'
+  rest=${msg_tags:+$msg_tags,}
+  while [ -n "$rest" ]; do
+    tag=${rest%%,*}
+    rest=${rest#*,}
+    if pushover_emoji "$tag"; then emoji=${emoji}${REPLY}; fi
+  done
+  [ -z "$msg_host" ] || suffix=" @${msg_host}"
+  title=$emoji
+  budget=$((PUSHOVER_TITLE_MAX - ${#emoji} - ${#suffix} - 1))
+  if [ -n "$msg_title" ] && [ "$budget" -gt 3 ]; then
+    truncate_utf8 "$msg_title" "$budget"
+    title=${title:+$title }$REPLY
+  fi
+  title=$(trim "${title}${suffix}")
+
+  case $msg_priority in
+    1) priority=-2 ;;
+    2) priority=-1 ;;
+    3) priority=0 ;;
+    # Priority 2 (emergency) needs retry/expire and keeps alerting until
+    # acknowledged, so it is never chosen automatically.
+    4 | 5) priority=1 ;;
+  esac
+
+  if [ -n "$attach" ]; then
+    if ! file_size "$attach"; then
+      err "添付ファイルを読めません: $attach"
+      return 1
+    fi
+    size=$REPLY
+    if [ "$size" -gt "$PUSHOVER_ATTACH_MAX" ]; then
+      note="添付ファイル ${msg_filename}（${size} バイト）は Pushover の上限 ${PUSHOVER_ATTACH_MAX} バイトを超えるため送っていません"
+      warn "$note"
+      body=${body:+$body$nl$nl}$note
+      attach=''
+    fi
+  fi
+  [ -z "$msg_attach_url" ] || tail=$nl$nl$msg_attach_url
+  [ -n "${body}${tail}" ] || body=$msg_filename
+  budget=$((PUSHOVER_MESSAGE_MAX - ${#tail}))
+  [ "$budget" -gt 3 ] || budget=4
+  truncate_utf8 "$body" "$budget"
+  body=$REPLY$tail
+
+  if [ "$opt_dry_run" = 1 ]; then
+    printf '%s\n' 'pushme: dry-run（送信していません）'
+    printf 'POST %s/messages.json\n' "$PUSHOVER_API"
+    printf 'token: %s\n' "$(mask "$cfg_pushover_token")"
+    printf 'user: %s\n' "$(mask "$cfg_pushover_user")"
+    if [ -n "$cfg_pushover_device" ]; then printf 'device: %s\n' "$cfg_pushover_device"; fi
+    if [ -n "$title" ]; then printf 'title: %s\n' "$title"; fi
+    if [ -n "$priority" ]; then printf 'priority: %s\n' "$priority"; fi
+    if [ -n "$msg_click" ]; then printf 'url: %s\n' "$msg_click"; fi
+    if [ -n "$attach" ]; then printf 'attachment: %s（%d バイト）\n' "$attach" "$size"; fi
+    printf -- '--- message（%d バイト）---\n%s\n' "${#body}" "$body"
+    return 0
+  fi
+
+  curl_conf=
+  curl_conf_add url "$PUSHOVER_API/messages.json"
+  pushover_add_key_fields
+  curl_conf_add form-string "message=${body}"
+  if [ -n "$title" ]; then curl_conf_add form-string "title=${title}"; fi
+  if [ -n "$priority" ]; then curl_conf_add form-string "priority=${priority}"; fi
+  if [ -n "$msg_click" ]; then curl_conf_add form-string "url=${msg_click}"; fi
+  if [ -n "$attach" ]; then
+    pushover_form_file "$attach" attachment
+    curl_conf_add form "$REPLY"
+  fi
+  curl_keep_body=1
+  curl_send_conf || {
+    curl_report_failure "$(pushover_errors "$curl_response")"
+    return 1
+  }
+}
+
+backend_pushover_doctor() {
+  local keys_ok=1
+  if [ -z "$cfg_pushover_token" ]; then
+    keys_ok=0
+    doctor_report NG "Pushover: PUSHME_PUSHOVER_TOKEN が未設定です"
+  fi
+  if [ -z "$cfg_pushover_user" ]; then
+    keys_ok=0
+    doctor_report NG "Pushover: PUSHME_PUSHOVER_USER が未設定です"
+  fi
+  if [ "$keys_ok" = 1 ] && ! backend_pushover_validate; then
+    keys_ok=0
+    doctor_report NG "Pushover: $problem"
+  fi
+  [ "$keys_ok" = 1 ] || return 0
+  if ! command -v "$cfg_curl" >/dev/null 2>&1; then
+    doctor_report NG "Pushover: curl がないためキーを確認できません"
+    return 0
+  fi
+  # users/validate.json checks the keys (and device) without sending a message.
+  curl_conf=
+  curl_conf_add url "$PUSHOVER_API/users/validate.json"
+  pushover_add_key_fields
+  curl_keep_body=1
+  if curl_send_conf; then
+    case $curl_response in
+      *'"status":1'*)
+        doctor_report OK "Pushover: キーを確認できました（通知は送っていません）"
+        return 0
+        ;;
+    esac
+  fi
+  local detail
+  detail=$(pushover_errors "$curl_response")
+  if [ -z "$detail" ]; then
+    detail=$(trim "$(printf '%s' "$curl_response" | tr '\r\n' '  ')")
+  fi
+  doctor_report NG "Pushover: キーを確認できません（HTTP ${curl_status}）: $(redact "${detail:-応答がありません}")"
 }
 
 # --- options shared by send and run ---------------------------------------
