@@ -1,0 +1,11 @@
+{
+  "session_id": "abc12345-6789-4def-8123-456789abcdef",
+  "transcript_path": "/home/someone/.claude/projects/example/abc12345.jsonl",
+  "cwd": "/home/someone/src/my-project",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "agent_id": "agent-def456",
+  "agent_type": "Explore",
+  "last_assistant_message": "Subagent finished."
+}

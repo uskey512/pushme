@@ -35,6 +35,7 @@ pushme — スマートフォンにプッシュ通知を送る（ntfy）
   pushme run [オプション] [--on-fail-only] [--tail N] -- コマンド [引数...]
   pushme init [--force] [--no-test]
   pushme doctor
+  pushme claude-hook [--dry-run]
   pushme help | version
 
 send と run のオプション:
@@ -64,6 +65,11 @@ run:
 init のオプション:
   --force     既存の設定ファイルを作り直す
   --no-test   最後にテスト通知を送るか尋ねない
+
+claude-hook:
+  Claude Code の hook から呼ばれ、標準入力の JSON を読んで通知する（jq が必要）。
+  常に終了コード 0 で終わり、標準出力には何も出さない。
+  --dry-run   送信せず、送る内容を標準エラー出力に表示する
 
 終了コード: 0 = 成功、1 = 送信の失敗、2 = 使い方の誤り・設定の不足（run を除く）
 設定ファイル: ~/.config/pushme/config（XDG_CONFIG_HOME や PUSHME_CONFIG で変更できる）
@@ -303,6 +309,8 @@ cfg_reset() {
   cfg_timeout=
   cfg_curl=
   cfg_ntfy_attach_max=
+  cfg_claude_min_seconds=
+  cfg_claude_include_message=
   cfg_file=
   cfg_file_state=missing
   cfg_unknown=()
@@ -335,6 +343,8 @@ config_read_file() {
       PUSHME_HOSTNAME) cfg_hostname=$value ;;
       PUSHME_TIMEOUT) cfg_timeout=$value ;;
       PUSHME_NTFY_ATTACH_MAX) cfg_ntfy_attach_max=$value ;;
+      PUSHME_CLAUDE_MIN_SECONDS) cfg_claude_min_seconds=$value ;;
+      PUSHME_CLAUDE_INCLUDE_MESSAGE) cfg_claude_include_message=$value ;;
       *) cfg_unknown+=("$lineno:$key") ;;
     esac
   done <"$1"
@@ -348,6 +358,8 @@ config_read_env() {
   if [ -n "${PUSHME_HOSTNAME:-}" ]; then cfg_hostname=$PUSHME_HOSTNAME; fi
   if [ -n "${PUSHME_TIMEOUT:-}" ]; then cfg_timeout=$PUSHME_TIMEOUT; fi
   if [ -n "${PUSHME_NTFY_ATTACH_MAX:-}" ]; then cfg_ntfy_attach_max=$PUSHME_NTFY_ATTACH_MAX; fi
+  if [ -n "${PUSHME_CLAUDE_MIN_SECONDS:-}" ]; then cfg_claude_min_seconds=$PUSHME_CLAUDE_MIN_SECONDS; fi
+  if [ -n "${PUSHME_CLAUDE_INCLUDE_MESSAGE:-}" ]; then cfg_claude_include_message=$PUSHME_CLAUDE_INCLUDE_MESSAGE; fi
   # Environment only: the config file must not choose a program to execute.
   if [ -n "${PUSHME_CURL:-}" ]; then cfg_curl=$PUSHME_CURL; fi
 }
@@ -392,6 +404,7 @@ load_config() {
   config_read_env
   : "${cfg_backend:=ntfy}" "${cfg_ntfy_url:=$NTFY_DEFAULT_URL}" "${cfg_timeout:=10}" "${cfg_curl:=curl}"
   : "${cfg_ntfy_attach_max:=$NTFY_ATTACH_MAX_DEFAULT}"
+  : "${cfg_claude_min_seconds:=30}" "${cfg_claude_include_message:=1}"
   while :; do
     case $cfg_ntfy_url in
       */) cfg_ntfy_url=${cfg_ntfy_url%/} ;;
@@ -421,6 +434,22 @@ config_check_common() {
     problem="PUSHME_TIMEOUT は 1 以上の整数（秒）にしてください"
     return 1
   fi
+}
+
+config_check_claude() {
+  case $cfg_claude_min_seconds in
+    '' | *[!0-9]*)
+      problem="PUSHME_CLAUDE_MIN_SECONDS は 0 以上の整数（秒）にしてください"
+      return 1
+      ;;
+  esac
+  case $cfg_claude_include_message in
+    0 | 1) ;;
+    *)
+      problem="PUSHME_CLAUDE_INCLUDE_MESSAGE は 0 か 1 にしてください"
+      return 1
+      ;;
+  esac
 }
 
 # --- HTTP --------------------------------------------------------------------
@@ -1124,6 +1153,146 @@ EOF
   fi
 }
 
+# --- Claude Code hooks --------------------------------------------------------
+
+claude_hook_field() {
+  printf '%s' "$hook_input" | jq -r "$1" 2>/dev/null
+}
+
+# Reads one hook event from stdin and sends the matching notification.
+claude_hook_handle() {
+  local event session_id cwd project project_tag state_dir record now start
+  local title tag body field line
+  if ! command -v jq >/dev/null 2>&1; then
+    err "claude-hook: jq が見つかりません（Claude Code の hook には jq が必要です）"
+    return 0
+  fi
+  hook_input=$(cat)
+  if ! printf '%s' "$hook_input" | jq -e 'type == "object"' >/dev/null 2>&1; then
+    err "claude-hook: 標準入力が JSON オブジェクトではありません"
+    return 0
+  fi
+  event=$(claude_hook_field '.hook_event_name // empty')
+  case $event in
+    UserPromptSubmit | Stop | Notification | StopFailure) ;;
+    *) return 0 ;;
+  esac
+  # A subagent or teammate shares the session, so its events must not start,
+  # end or report the main conversation's turn.
+  [ -z "$(claude_hook_field '.agent_id // empty')" ] || return 0
+
+  # The session id becomes a file name, so it is reduced to safe characters.
+  session_id=$(claude_hook_field '.session_id // empty' | tr -cd 'A-Za-z0-9_-')
+  cwd=$(claude_hook_field '.cwd // empty')
+  project=${CLAUDE_PROJECT_DIR:-$cwd}
+  while :; do
+    case $project in
+      ?*/) project=${project%/} ;;
+      *) break ;;
+    esac
+  done
+  project=${project##*/}
+  : "${project:=Claude Code}"
+  project_tag=${project//,/}
+  state_dir=${XDG_STATE_HOME:-${HOME:-}/.local/state}/pushme/claude
+  record=$state_dir/$session_id
+
+  case $event in
+    UserPromptSubmit)
+      [ -n "$session_id" ] || return 0
+      if [ ! -d "$state_dir" ]; then
+        mkdir -p "$state_dir" && chmod 700 "$state_dir" || return 0
+      fi
+      date +%s >"$record"
+      # Sessions that never reach Stop leave their record behind.
+      find "$state_dir" -type f -mmin +10080 -exec rm -f {} + 2>/dev/null
+      return 0
+      ;;
+    Stop)
+      # true while Claude keeps working because a stop hook asked it to; the
+      # turn has not ended yet.
+      [ "$(claude_hook_field '.stop_hook_active // empty')" != true ] || return 0
+      [ -n "$session_id" ] && [ -f "$record" ] || return 0
+      start=$(cat "$record")
+      rm -f "$record"
+      case $start in
+        '' | *[!0-9]*) return 0 ;;
+      esac
+      if ! load_valid_config || ! config_check_claude; then
+        err "claude-hook: $problem"
+        return 0
+      fi
+      now=$(date +%s)
+      [ $((now - start)) -ge "$cfg_claude_min_seconds" ] || return 0
+      format_duration $((now - start))
+      title="$project 完了"
+      tag=white_check_mark
+      body="$REPLY · session ${session_id:0:8}"
+      if [ "$cfg_claude_include_message" = 1 ]; then
+        line=$(claude_hook_field '.last_assistant_message // "" | if length > 300 then .[:300] + "…" else . end')
+        [ -z "$line" ] || body=$body$'\n'$line
+      fi
+      ;;
+    Notification)
+      case $(claude_hook_field '.notification_type // empty') in
+        permission_prompt | elicitation_dialog | elicitation_url_dialog) ;;
+        *) return 0 ;;
+      esac
+      title="$project 承認待ち"
+      tag=question
+      body=''
+      for field in title message; do
+        line=$(claude_hook_field ".$field // empty")
+        [ -z "$line" ] || body=${body:+$body$'\n'}$line
+      done
+      : "${body:=Claude Code が応答を待っています}"
+      ;;
+    StopFailure)
+      title="$project エラー"
+      tag=x
+      body=''
+      for field in error error_details last_assistant_message; do
+        line=$(claude_hook_field ".$field // empty")
+        [ -z "$line" ] || body=${body:+$body$'\n'}$line
+      done
+      : "${body:=Claude Code の応答がエラーで止まりました}"
+      ;;
+  esac
+
+  if [ "$event" != Stop ] && ! load_valid_config; then
+    err "claude-hook: $problem"
+    return 0
+  fi
+  msg_title=$title
+  msg_priority=4
+  msg_tags=$tag${project_tag:+,$project_tag}
+  msg_body=$body
+  set_message_host
+  "backend_${cfg_backend}_send"
+  return 0
+}
+
+# Claude Code reads exit code 2 from a Stop hook as "keep working" and may
+# take hook stdout as instructions, so this always exits 0 and keeps stdout
+# empty.
+cmd_claude_hook() {
+  reset_message_options
+  msg_click=''
+  msg_markdown=0
+  msg_attach=''
+  msg_attach_url=''
+  msg_filename=''
+  case ${1:-} in
+    '') (claude_hook_handle) >/dev/null ;;
+    --dry-run)
+      opt_dry_run=1
+      (claude_hook_handle) >&2
+      ;;
+    *) err "claude-hook に不明な引数があります: $1" ;;
+  esac
+  exit 0
+}
+
 doctor_report() {
   printf '[%s] %s\n' "$1" "$2"
   if [ "$1" = NG ]; then doctor_ng=$((doctor_ng + 1)); fi
@@ -1173,6 +1342,7 @@ cmd_doctor() {
   else
     doctor_report NG "$problem"
   fi
+  config_check_claude || doctor_report NG "$problem"
 
   if [ "$doctor_ng" -gt 0 ]; then
     printf '問題が %d 件あります\n' "$doctor_ng"
@@ -1199,6 +1369,10 @@ main() {
     doctor)
       shift
       cmd_doctor "$@"
+      ;;
+    claude-hook)
+      shift
+      cmd_claude_hook "$@"
       ;;
     help | -h | --help) usage ;;
     version | --version) printf 'pushme %s\n' "$PUSHME_VERSION" ;;

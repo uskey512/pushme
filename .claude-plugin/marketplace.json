@@ -1,0 +1,8 @@
+{
+  "name": "pushme",
+  "description": "Push notifications from Claude Code hooks",
+  "owner": { "name": "uskey512" },
+  "plugins": [
+    { "name": "pushme", "source": "./", "description": "Push notifications from Claude Code hooks (task finished, waiting for approval, API error)" }
+  ]
+}

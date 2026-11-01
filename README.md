@@ -13,6 +13,7 @@ pushme run -- make test      # 終わったら成否・所要時間を通知
 
 - bash 3.2 以降（macOS 標準の `/bin/bash` で動きます）
 - curl
+- jq（Claude Code から通知する場合だけ）
 - Android 端末と ntfy アプリ（Google Play または F-Droid）
 
 ## インストール
@@ -168,6 +169,58 @@ pushme run -a build.log -- sh -c 'make > build.log 2>&1'
 - シグナルで終了した場合（終了コードが 128 より大きい）も失敗として通知します。Ctrl-C を押すとコマンドが止まり、失敗の通知を送ってから、終了コード 130 で終わります
 - pushme のプロセスだけに `SIGTERM` を送った場合は、コマンドが終わるのを待ってから通知します。bash の制約で、コマンドには転送されません。止めたいときは、コマンドを含むプロセスグループ全体に送ってください
 
+## Claude Code から通知する
+
+Claude Code のプラグインとして入れると、次のときに通知が届きます。
+
+| タイミング | タイトル | 本文 |
+|---|---|---|
+| 返答が終わったとき（`PUSHME_CLAUDE_MIN_SECONDS` 秒以上かかったときだけ） | `<プロジェクト名> 完了` ✅ | 所要時間、セッション ID の先頭 8 文字、返答の先頭 300 文字 |
+| 操作の承認や入力を待っているとき | `<プロジェクト名> 承認待ち` ❓ | Claude Code の通知文 |
+| API エラーで止まったとき | `<プロジェクト名> エラー` ❌ | エラーの種類と詳細 |
+
+- 優先度はどれも 4（high）です。タグにはプロジェクト名とホスト名が付きます
+- プロジェクト名はディレクトリ名だけで、フルパスは送りません
+- サブエージェントの終了では通知しません
+
+### インストール
+
+前提として、`pushme init` で設定ファイルを作ってあることと、jq が入っていることが必要です（どちらも `pushme doctor` で確認できます）。
+
+```sh
+claude plugin install pushme --marketplace uskey512/pushme
+```
+
+Claude Code のセッションの中からは次のように入れます。
+
+```
+/plugin install pushme --marketplace uskey512/pushme
+```
+
+プラグインは同梱の `bin/pushme` を使うので、`make install` していなくても動きます。設定は `~/.config/pushme/config` を共有します。返答を通知に載せたくない、短い作業でも通知したい、といった調整は `PUSHME_CLAUDE_INCLUDE_MESSAGE` と `PUSHME_CLAUDE_MIN_SECONDS`（「設定」の表を参照）で行います。
+
+### 更新
+
+サードパーティのマーケットプレイスは、既定では自動で更新されません。次のコマンドで更新します。
+
+```sh
+claude plugin update pushme@pushme
+```
+
+### プラグインを使わない場合
+
+[examples/claude-settings.snippet.json](examples/claude-settings.snippet.json) の `hooks` の中身を `~/.claude/settings.json` の `"hooks"` に追記し、`/path/to/pushme` を実際の場所に書き換えます。プラグインと両方を設定すると、同じ通知が 2 回届きます。
+
+### 動作確認
+
+`--dry-run` を付けると、送らずに内容を標準エラー出力に表示します。
+
+```sh
+pushme claude-hook --dry-run < test/fixtures/claude/stop-failure.json
+```
+
+`pushme claude-hook` は Claude Code を止めないよう、何があっても終了コード 0 で終わり、標準出力には何も出しません。うまく届かないときは `~/.local/state/pushme/error.log` を確認してください。
+
 ## 設定
 
 設定は次の順に読み込み、後から読んだものが優先されます。
@@ -191,6 +244,8 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_HOSTNAME` | `hostname -s` の結果 | ホスト名タグ |
 | `PUSHME_TIMEOUT` | `10` | curl の `--max-time`（秒） |
 | `PUSHME_NTFY_ATTACH_MAX` | `2097152` | 添付できるファイルの上限（バイト） |
+| `PUSHME_CLAUDE_MIN_SECONDS` | `30` | Claude Code の返答がこの秒数以上かかったときだけ「完了」を通知する |
+| `PUSHME_CLAUDE_INCLUDE_MESSAGE` | `1` | `0` にすると「完了」の通知に返答の先頭を載せない |
 | `PUSHME_CURL` | `curl` | 使う curl コマンド。**環境変数でだけ**指定できる（設定ファイルに書いても無視する） |
 
 設定ファイルは `0600`、それを置くディレクトリは `0700` にしてください。これより緩いと、送信時に警告を出します（送信は続けます）。設定ファイルを置かない環境では、環境変数 `PUSHME_NTFY_TOPIC` だけでも動きます。
@@ -199,6 +254,7 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 - **トピック名はパスワードと同じです。** 知っている人は誰でもあなたの端末に通知を送れますし、購読すれば通知の内容を読めます。リポジトリ、スクリプト、チャットに書かないでください。漏れたときは `pushme init --force` で作り直し、アプリの購読も新しいトピック名に切り替えてください
 - **秘密情報を通知に入れないでください。** ntfy.sh にはメッセージが平文で 12 時間残ります。パスワード、トークン、個人情報などは送らないでください
+- Claude Code の「完了」の通知には、返答の先頭 300 文字が入ります。これも ntfy.sh に平文で 12 時間残るので、返答に機密が含まれうる場合は `PUSHME_CLAUDE_INCLUDE_MESSAGE=0` にしてください
 - **無料枠は 1 日 250 通です。** ループの中から大量に送らないでください。制限を超え続けると、IP アドレスが一時的に止められることがあります
 - pushme は、エラーメッセージ・ログ・`--dry-run` の出力でトピック名とトークンを伏せ字にします。curl にはコマンドライン引数ではなく標準入力で渡すので、`ps` の表示にも出ません
 
