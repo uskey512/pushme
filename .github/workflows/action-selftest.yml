@@ -1,0 +1,83 @@
+name: Action self-test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      # A made-up topic: every call below is a dry run.
+      SELFTEST_TOPIC: pushme-selftest-topic-not-real
+    steps:
+      - uses: actions/checkout@v7
+
+      - id: dry-run
+        uses: ./
+        with:
+          message: "セルフテスト $(touch injected) `touch injected`"
+          topic: ${{ env.SELFTEST_TOPIC }}
+          title: セルフテスト
+          tags: test
+          dry-run: true
+
+      - name: Check the dry-run output
+        env:
+          STATUS: ${{ steps.dry-run.outputs.status }}
+          OUTPUT: ${{ steps.dry-run.outputs.dry-run-output }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          printf '%s\n' "$OUTPUT"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$STATUS" = dry-run ] || fail "status is '$STATUS'"
+          [ ! -e injected ] || fail "the message ran as shell code"
+          case $OUTPUT in *"$SELFTEST_TOPIC"*) fail "the topic is not masked" ;; esac
+          # shellcheck disable=SC2016 # the message must stay unexpanded
+          for want in \
+            'POST https://ntfy.sh/pus…(30 chars)' \
+            'X-Title: セルフテスト' \
+            'X-Priority: 4' \
+            "X-Tags: test,$REPOSITORY" \
+            "X-Click: $RUN_URL" \
+            'セルフテスト $(touch injected) `touch injected`'; do
+            case $OUTPUT in *"$want"*) ;; *) fail "missing: $want" ;; esac
+          done
+
+      - id: warn-only
+        uses: ./
+        with:
+          message: an invalid priority must only warn
+          topic: ${{ env.SELFTEST_TOPIC }}
+          priority: loudest
+          dry-run: true
+
+      - id: fail-on-error
+        continue-on-error: true
+        uses: ./
+        with:
+          message: an invalid priority must fail this step
+          topic: ${{ env.SELFTEST_TOPIC }}
+          priority: loudest
+          dry-run: true
+          fail-on-error: true
+
+      - name: Check the failure handling
+        env:
+          WARN_STATUS: ${{ steps.warn-only.outputs.status }}
+          WARN_OUTCOME: ${{ steps.warn-only.outcome }}
+          FAIL_OUTCOME: ${{ steps.fail-on-error.outcome }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$WARN_STATUS" = failed ] || fail "warn-only status is '$WARN_STATUS'"
+          [ "$WARN_OUTCOME" = success ] || fail "warn-only outcome is '$WARN_OUTCOME'"
+          [ "$FAIL_OUTCOME" = failure ] || fail "fail-on-error outcome is '$FAIL_OUTCOME'"

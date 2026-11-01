@@ -18,6 +18,10 @@ jobs:
       - name: Show tool versions
         run: shellcheck --version && shfmt --version
       - run: make lint
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
 
   test:
     strategy:

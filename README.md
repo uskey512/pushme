@@ -221,6 +221,77 @@ pushme claude-hook --dry-run < test/fixtures/claude/stop-failure.json
 
 `pushme claude-hook` は Claude Code を止めないよう、何があっても終了コード 0 で終わり、標準出力には何も出しません。うまく届かないときは `~/.local/state/pushme/error.log` を確認してください。
 
+## GitHub Actions から通知する
+
+このリポジトリは composite action としても使えます。ランナーへのインストールや checkout は要りません（ubuntu と macOS のランナーで動きます）。
+
+### Secrets の登録
+
+トピック名はリポジトリの Secrets に入れます。次のコマンドは値を対話で尋ねるので、シェルの履歴に残りません。
+
+```sh
+gh secret set NTFY_TOPIC --repo owner/repo
+```
+
+### 使い方
+
+成功と失敗で、優先度とタグを変える例です。
+
+```yaml
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: make test
+
+      - name: 成功を通知
+        if: success()
+        uses: uskey512/pushme@main
+        with:
+          topic: ${{ secrets.NTFY_TOPIC }}
+          title: ${{ github.workflow }} 成功
+          message: ${{ github.repository }} の ${{ github.ref_name }} でテストが通りました
+          priority: default
+          tags: white_check_mark
+
+      - name: 失敗を通知
+        if: failure()
+        uses: uskey512/pushme@main
+        with:
+          topic: ${{ secrets.NTFY_TOPIC }}
+          title: ${{ github.workflow }} 失敗
+          message: ${{ github.repository }} の ${{ github.ref_name }} でテストが失敗しました
+          priority: urgent
+          tags: x
+```
+
+- composite action は secrets を直接読めないので、`topic: ${{ secrets.NTFY_TOPIC }}` のように渡します。topic と token はログでマスクされます
+- `@main` の代わりにコミット SHA を書くと、意図しない変更を取り込まずに済みます
+- 通知をタップすると、そのワークフロー実行のページが開きます。タグの末尾にはリポジトリ名（`owner/repo`）が付きます
+- 入力の値はシェルに展開せず環境変数で渡すので、`with:` にブランチ名や PR のタイトルのような外から来る値を書いても、コマンドとして実行されることはありません
+- 既定では、通知に失敗してもジョブは失敗させず、警告を出すだけです。失敗させたいときは `fail-on-error: true` を指定します
+
+| 入力 | 既定値 | 説明 |
+|---|---|---|
+| `message` | （必須） | 本文 |
+| `topic` | | トピック名。空のときはジョブの環境変数 `PUSHME_NTFY_TOPIC` を使う |
+| `title` | | タイトル |
+| `priority` | `high` | 優先度。`1`〜`5` または `min` / `low` / `default` / `high` / `urgent` |
+| `tags` | | タグ（カンマ区切り） |
+| `click` | この実行のページ | 通知をタップしたときに開く URL |
+| `server` | `https://ntfy.sh` | ntfy サーバーの URL |
+| `token` | | アクセストークン（自前の ntfy サーバー向け） |
+| `markdown` | `false` | 本文を Markdown として表示する |
+| `attach` | | 添付するファイルのパス |
+| `dry-run` | `false` | 送信せず、送る内容をログに出す |
+| `fail-on-error` | `false` | 通知に失敗したらステップを失敗させる |
+
+| 出力 | 説明 |
+|---|---|
+| `status` | `sent` / `dry-run` / `failed` のどれか |
+| `dry-run-output` | `dry-run` のときに表示した送信内容（トピック名とトークンは伏せ字） |
+
 ## 設定
 
 設定は次の順に読み込み、後から読んだものが優先されます。
