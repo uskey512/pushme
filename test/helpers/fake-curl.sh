@@ -5,6 +5,8 @@
 #   $FAKE_CURL_DIR/N.url      the URL
 #   $FAKE_CURL_DIR/N.headers  header values, unescaped, one per line
 #   $FAKE_CURL_DIR/N.body     data-raw value, unescaped
+#   $FAKE_CURL_DIR/N.upload   copy of the upload-file
+#   $FAKE_CURL_DIR/N.method   GET, POST (data-raw) or PUT (upload-file)
 # and $FAKE_CURL_DIR/calls holds the number of calls so far.
 #
 # Outcome knobs:
@@ -75,6 +77,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+method=GET
 if [ "$config" = - ]; then
   cat >"$dir/$n.config"
   while IFS= read -r line || [ -n "$line" ]; do
@@ -86,11 +89,19 @@ if [ "$config" = - ]; then
     case $key in
       url) url=$REPLY ;;
       header) printf '%s\n' "$REPLY" >>"$dir/$n.headers" ;;
-      data-raw) printf '%s' "$REPLY" >"$dir/$n.body" ;;
+      data-raw)
+        method=POST
+        printf '%s' "$REPLY" >"$dir/$n.body"
+        ;;
+      upload-file)
+        method=PUT
+        cp "$REPLY" "$dir/$n.upload" || exit 26
+        ;;
     esac
   done <"$dir/$n.config"
 fi
 printf '%s\n' "$url" >"$dir/$n.url"
+echo "$method" >"$dir/$n.method"
 
 # shellcheck disable=SC2086 # split the list into words
 set -- ${FAKE_CURL_EXITS:-0}
