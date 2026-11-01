@@ -13,7 +13,7 @@ pushme run -- make test      # 終わったら成否・所要時間を通知
 
 - bash 3.2 以降（macOS 標準の `/bin/bash` で動きます）
 - curl
-- jq（Claude Code から通知する場合だけ）
+- jq（Claude Code・Codex から通知する場合だけ）
 - Android 端末と ntfy アプリ（Google Play または F-Droid）
 
 ## インストール
@@ -221,6 +221,39 @@ pushme claude-hook --dry-run < test/fixtures/claude/stop-failure.json
 
 `pushme claude-hook` は Claude Code を止めないよう、何があっても終了コード 0 で終わり、標準出力には何も出しません。うまく届かないときは `~/.local/state/pushme/error.log` を確認してください。
 
+## Codex から通知する
+
+Codex CLI の hooks からも、次のときに通知が届きます。
+
+| タイミング | タイトル | 本文 |
+|---|---|---|
+| 返答が終わったとき（`PUSHME_CODEX_MIN_SECONDS` 秒以上かかったときだけ） | `<プロジェクト名> 完了` ✅ | 所要時間、セッション ID の先頭 8 文字、返答の先頭 300 文字 |
+| コマンドの実行などの承認を求められたとき | `<プロジェクト名> 承認待ち` ❓ | ツール名と、実行しようとしているコマンドの先頭 300 文字 |
+
+- 優先度はどれも 4（high）です。タグにはプロジェクト名とホスト名が付きます
+- プロジェクト名は作業ディレクトリの名前だけで、フルパスは送りません
+- Ctrl-C で中断したターンと、サブエージェントの終了では通知しません
+
+Claude Code 版との違いは次のとおりです。
+
+- エラーの通知はありません。Codex には、API エラーで止まったときのイベントがないためです
+- 承認待ちは、承認を求められた瞬間に届きます。Claude Code のような猶予がないので、画面の前にいても鳴ります。不要なら `PUSHME_CODEX_NOTIFY_PERMISSION=0` にしてください
+- サブエージェントの承認要求も通知します（承認するのは利用者のため）
+
+### 設定方法
+
+前提として、`make install` で `~/.local/bin/pushme` に入れてあること、`pushme init` で設定ファイルを作ってあること、jq が入っていることが必要です。
+
+1. [examples/codex-hooks.snippet.json](examples/codex-hooks.snippet.json) の各イベントの要素を、`~/.codex/hooks.json` の同じイベントの配列に追記します（ファイルが無ければ、そのまま置けます）。hooks を `~/.codex/config.toml` に書いている場合は、代わりに [examples/codex-config.snippet.toml](examples/codex-config.snippet.toml) を追記します。同じ場所に `hooks.json` と `config.toml` の `[hooks]` が両方あると Codex が警告を出すので、どちらか一方に書いてください
+2. Codex で `/hooks` を開き、pushme の hook を信頼（trust）します。信頼するまで、hook は実行されません
+3. 送られる内容は `--dry-run` で確かめられます（標準エラー出力に表示し、送信はしません）
+
+   ```sh
+   pushme codex-hook --dry-run < test/fixtures/codex/permission-request.json
+   ```
+
+Codex の `config.toml` の `notify`（古い仕組み。ターンの完了しか通知できず、コマンドを 1 つしか登録できない）は使いません。
+
 ## GitHub Actions から通知する
 
 このリポジトリは composite action としても使えます。ランナーへのインストールや checkout は要りません（ubuntu と macOS のランナーで動きます）。
@@ -346,6 +379,9 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_NTFY_ATTACH_MAX` | `2097152` | 添付できるファイルの上限（バイト） |
 | `PUSHME_CLAUDE_MIN_SECONDS` | `30` | Claude Code の返答がこの秒数以上かかったときだけ「完了」を通知する |
 | `PUSHME_CLAUDE_INCLUDE_MESSAGE` | `1` | `0` にすると「完了」の通知に返答の先頭を載せない |
+| `PUSHME_CODEX_MIN_SECONDS` | `30` | Codex の返答がこの秒数以上かかったときだけ「完了」を通知する |
+| `PUSHME_CODEX_INCLUDE_MESSAGE` | `1` | `0` にすると Codex の「完了」の通知に返答の先頭を載せない |
+| `PUSHME_CODEX_NOTIFY_PERMISSION` | `1` | `0` にすると Codex の承認待ちを通知しない |
 | `PUSHME_PUSHOVER_TOKEN` | なし | Pushover の API Token（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_USER` | なし | Pushover の User Key（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_DEVICE` | なし | 送る端末の名前（カンマ区切りで複数）。なければすべての端末 |
@@ -357,7 +393,7 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 - **トピック名はパスワードと同じです。** 知っている人は誰でもあなたの端末に通知を送れますし、購読すれば通知の内容を読めます。リポジトリ、スクリプト、チャットに書かないでください。漏れたときは `pushme init --force` で作り直し、アプリの購読も新しいトピック名に切り替えてください
 - **秘密情報を通知に入れないでください。** ntfy.sh にはメッセージが平文で 12 時間残ります。パスワード、トークン、個人情報などは送らないでください
-- Claude Code の「完了」の通知には、返答の先頭 300 文字が入ります。これも ntfy.sh に平文で 12 時間残るので、返答に機密が含まれうる場合は `PUSHME_CLAUDE_INCLUDE_MESSAGE=0` にしてください
+- Claude Code と Codex の「完了」の通知には返答の先頭 300 文字が、Codex の「承認待ち」の通知には実行しようとしているコマンドが入ります。これらも ntfy.sh に平文で 12 時間残るので、機密が含まれうる場合は `PUSHME_CLAUDE_INCLUDE_MESSAGE=0`・`PUSHME_CODEX_INCLUDE_MESSAGE=0`・`PUSHME_CODEX_NOTIFY_PERMISSION=0` にしてください
 - **無料枠は 1 日 250 通です。** ループの中から大量に送らないでください。制限を超え続けると、IP アドレスが一時的に止められることがあります
 - pushme は、エラーメッセージ・ログ・`--dry-run` の出力でトピック名とトークンを伏せ字にします。curl にはコマンドライン引数ではなく標準入力で渡すので、`ps` の表示にも出ません
 

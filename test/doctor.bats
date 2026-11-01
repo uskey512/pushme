@@ -25,7 +25,7 @@ load helpers/common.sh
 @test "doctor: mentions jq as optional for Claude Code hooks" {
   write_config "PUSHME_NTFY_TOPIC=$TEST_TOPIC"
   run pushme doctor </dev/null
-  [[ $output == *"jq: "*"Claude Code の hook を使うなら必要"* ]]
+  [[ $output == *"jq: "*"Claude Code や Codex の hook を使うなら必要"* ]]
 }
 
 @test "doctor: a missing topic is a problem" {

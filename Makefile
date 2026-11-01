@@ -3,7 +3,7 @@ BINDIR := $(PREFIX)/bin
 
 SHELL_SOURCES := bin/pushme action/run.sh $(wildcard test/helpers/*.sh)
 BATS_SOURCES := $(wildcard test/*.bats)
-JSON_SOURCES := $(wildcard .claude-plugin/*.json hooks/*.json examples/*.json test/fixtures/claude/*.json)
+JSON_SOURCES := $(wildcard .claude-plugin/*.json hooks/*.json examples/*.json test/fixtures/claude/*.json test/fixtures/codex/*.json)
 SHFMT_FLAGS := -i 2 -ci
 
 .PHONY: install test lint

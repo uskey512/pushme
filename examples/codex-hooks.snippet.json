@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 10, "async": true } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 10, "async": true } ] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 10, "async": true } ] }
+    ],
+    "Interrupt": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 3, "async": true } ] }
+    ]
+  }
+}
