@@ -1,0 +1,81 @@
+name: pushme
+description: Send a push notification to your phone through ntfy
+author: uskey512
+branding:
+  icon: bell
+  color: green
+
+inputs:
+  message:
+    description: 本文
+    required: true
+  topic:
+    description: ntfy のトピック名。secrets から渡す（例 secrets.NTFY_TOPIC）
+    required: false
+  title:
+    description: タイトル
+    required: false
+  priority:
+    description: 優先度。1〜5 または min / low / default / high / urgent
+    required: false
+    default: high
+  tags:
+    description: タグ（カンマ区切り）。末尾にリポジトリ名のタグが付く
+    required: false
+  click:
+    description: 通知をタップしたときに開く URL。既定はこのワークフロー実行のページ
+    required: false
+    default: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  server:
+    description: ntfy サーバーの URL
+    required: false
+    default: https://ntfy.sh
+  token:
+    description: ntfy のアクセストークン（自前のサーバー向け）。secrets から渡す
+    required: false
+  markdown:
+    description: true にすると本文を Markdown として表示する
+    required: false
+    default: "false"
+  attach:
+    description: 添付するファイルのパス
+    required: false
+  dry-run:
+    description: true にすると送信せず、送る内容をログに出す（トピック名とトークンは伏せ字）
+    required: false
+    default: "false"
+  fail-on-error:
+    description: true にすると、通知に失敗したときにジョブを失敗させる。false なら警告だけ出す
+    required: false
+    default: "false"
+
+outputs:
+  status:
+    description: sent / dry-run / failed のどれか
+    value: ${{ steps.send.outputs.status }}
+  dry-run-output:
+    description: dry-run のときに表示した送信内容
+    value: ${{ steps.send.outputs.dry-run-output }}
+
+runs:
+  using: composite
+  steps:
+    - id: send
+      shell: bash
+      # Inputs go through env only; expanding them inside run would let their
+      # content run as shell code.
+      env:
+        INPUT_MESSAGE: ${{ inputs.message }}
+        INPUT_TOPIC: ${{ inputs.topic }}
+        INPUT_TITLE: ${{ inputs.title }}
+        INPUT_PRIORITY: ${{ inputs.priority }}
+        INPUT_TAGS: ${{ inputs.tags }}
+        INPUT_CLICK: ${{ inputs.click }}
+        INPUT_SERVER: ${{ inputs.server }}
+        INPUT_TOKEN: ${{ inputs.token }}
+        INPUT_MARKDOWN: ${{ inputs.markdown }}
+        INPUT_ATTACH: ${{ inputs.attach }}
+        INPUT_DRY_RUN: ${{ inputs.dry-run }}
+        INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        PUSHME_HOSTNAME: ${{ github.repository }}
+      run: bash "$GITHUB_ACTION_PATH/action/run.sh"

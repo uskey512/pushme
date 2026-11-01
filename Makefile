@@ -1,7 +1,7 @@
 PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
 
-SHELL_SOURCES := bin/pushme $(wildcard test/helpers/*.sh)
+SHELL_SOURCES := bin/pushme action/run.sh $(wildcard test/helpers/*.sh)
 BATS_SOURCES := $(wildcard test/*.bats)
 JSON_SOURCES := $(wildcard .claude-plugin/*.json hooks/*.json examples/*.json test/fixtures/claude/*.json)
 SHFMT_FLAGS := -i 2 -ci
