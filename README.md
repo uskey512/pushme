@@ -434,7 +434,7 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ## 開発
 
 ```sh
-make test   # bats-core でテストを実行する（実際の ntfy.sh には送らない）
+make test   # bats-core でテストを実行する（実際の ntfy.sh には送らない。ファイルごとに並列、JOBS=1 で 1 つずつ）
 make lint   # shellcheck と shfmt
 ```
 

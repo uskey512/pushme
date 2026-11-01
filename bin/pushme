@@ -623,7 +623,8 @@ curl_send_conf() {
     # retried, since ntfy.sh may ban clients that keep exceeding its limits.
     if [ "$curl_rc" -eq 7 ] && [ "$attempt" -lt 2 ]; then
       attempt=$((attempt + 1))
-      sleep 1
+      # PUSHME_TEST_RETRY_DELAY lets the test suite skip the wait.
+      sleep "${PUSHME_TEST_RETRY_DELAY:-1}"
       continue
     fi
     break

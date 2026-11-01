@@ -26,6 +26,7 @@ setup() {
     PUSHME_DND PUSHME_DND_MODE PUSHME_DND_TZ PUSHME_TEST_NOW \
     FAKE_CURL_EXITS FAKE_CURL_STATUS FAKE_CURL_BODY FAKE_CURL_STDERR
   export PUSHME_CURL=$PUSHME_ROOT/test/helpers/fake-curl.sh
+  export PUSHME_TEST_RETRY_DELAY=0
   export FAKE_CURL_DIR=$BATS_TEST_TMPDIR/curl
   mkdir -p "$FAKE_CURL_DIR"
   CONFIG_FILE=$XDG_CONFIG_HOME/pushme/config
@@ -90,12 +91,14 @@ file_mode() {
   stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1"
 }
 
-# Repeats string $1 $2 times.
+# Repeats string $1 $2 times. Built by doubling: bats runs a DEBUG trap on
+# every command of a test, so a loop per character costs seconds.
 repeat() {
-  local out='' i=0
-  while [ "$i" -lt "$2" ]; do
-    out=$out$1
-    i=$((i + 1))
+  local unit=$1 n=$2 out=''
+  while [ "$n" -gt 0 ]; do
+    if [ $((n % 2)) -eq 1 ]; then out=$out$unit; fi
+    unit=$unit$unit
+    n=$((n / 2))
   done
   printf '%s' "$out"
 }
