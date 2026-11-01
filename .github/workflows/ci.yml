@@ -1,61 +1,130 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
+    paths-ignore: ["**.md", LICENSE]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  lint:
+  linux:
     runs-on: ubuntu-latest
+    env:
+      # A made-up topic: every action call below is a dry run.
+      SELFTEST_TOPIC: pushme-selftest-topic-not-real
     steps:
       - uses: actions/checkout@v7
-      - name: Install shfmt
-        run: sudo apt-get update && sudo apt-get install -y shfmt
-      - name: Show tool versions
-        run: shellcheck --version && shfmt --version
+      - name: Install shfmt and bats
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shfmt
+          git clone -q --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core "$RUNNER_TEMP/bats"
+          echo "$RUNNER_TEMP/bats/bin" >>"$GITHUB_PATH"
       - run: make lint
-      - name: actionlint
-        uses: docker://rhysd/actionlint:1.7.12
+      - uses: docker://rhysd/actionlint:1.7.12
         with:
           args: -color
-
-  test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Install bats (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bats
-      - name: Install bats (macOS)
-        if: runner.os == 'macOS'
-        run: brew install bats-core
-      # The suite runs bin/pushme with /bin/bash; on macOS that must be the
-      # stock 3.2 for the matrix to prove bash 3.2 compatibility.
-      - name: Check /bin/bash is 3.2
-        if: runner.os == 'macOS'
-        run: /bin/bash -c 'echo "$BASH_VERSION"; [ "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}" = 3.2 ]'
       - run: make test
 
-  gitleaks:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Lets the action list the commits of a pull request.
-      pull-requests: read
+      - id: dry-run
+        uses: ./
+        with:
+          message: "セルフテスト $(touch injected) `touch injected`"
+          topic: ${{ env.SELFTEST_TOPIC }}
+          title: セルフテスト
+          tags: test
+          dry-run: true
+      - name: Check the action's dry-run output
+        env:
+          STATUS: ${{ steps.dry-run.outputs.status }}
+          OUTPUT: ${{ steps.dry-run.outputs.dry-run-output }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          printf '%s\n' "$OUTPUT"
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$STATUS" = dry-run ] || fail "status is '$STATUS'"
+          [ ! -e injected ] || fail "the message ran as shell code"
+          case $OUTPUT in *"$SELFTEST_TOPIC"*) fail "the topic is not masked" ;; esac
+          # shellcheck disable=SC2016 # the message must stay unexpanded
+          for want in \
+            'POST https://ntfy.sh/pus…(30 chars)' \
+            'X-Title: セルフテスト' \
+            'X-Priority: 4' \
+            "X-Tags: test,$REPOSITORY" \
+            "X-Click: $RUN_URL" \
+            'セルフテスト $(touch injected) `touch injected`'; do
+            case $OUTPUT in *"$want"*) ;; *) fail "missing: $want" ;; esac
+          done
+
+      # A range around the current hour in Tokyo, so this checks the real
+      # PUSHME_DND_TZ path and that step env reaches the action.
+      - id: dnd-range
+        run: |
+          hour=$(TZ=Asia/Tokyo date +%H)
+          hour=$((10#$hour))
+          echo "range=$(((hour + 23) % 24)):00-$(((hour + 2) % 24)):00" >>"$GITHUB_OUTPUT"
+      - id: dnd
+        uses: ./
+        env:
+          PUSHME_DND: ${{ steps.dnd-range.outputs.range }}
+          PUSHME_DND_TZ: Asia/Tokyo
+        with:
+          message: the do-not-disturb hours must hold this back
+          topic: ${{ env.SELFTEST_TOPIC }}
+          dry-run: true
+      - name: Check the action's do-not-disturb handling
+        env:
+          OUTPUT: ${{ steps.dnd.outputs.dry-run-output }}
+          RANGE: ${{ steps.dnd-range.outputs.range }}
+        run: |
+          printf '%s\n' "$OUTPUT"
+          case $OUTPUT in
+            *"おやすみ時間（${RANGE}）のため送りません"*) ;;
+            *) echo "::error::the message was not held back"; exit 1 ;;
+          esac
+
+      - id: warn-only
+        uses: ./
+        with:
+          message: an invalid priority must only warn
+          topic: ${{ env.SELFTEST_TOPIC }}
+          priority: loudest
+          dry-run: true
+      - id: fail-on-error
+        continue-on-error: true
+        uses: ./
+        with:
+          message: an invalid priority must fail this step
+          topic: ${{ env.SELFTEST_TOPIC }}
+          priority: loudest
+          dry-run: true
+          fail-on-error: true
+      - name: Check the action's failure handling
+        env:
+          WARN_STATUS: ${{ steps.warn-only.outputs.status }}
+          WARN_OUTCOME: ${{ steps.warn-only.outcome }}
+          FAIL_OUTCOME: ${{ steps.fail-on-error.outcome }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          [ "$WARN_STATUS" = failed ] || fail "warn-only status is '$WARN_STATUS'"
+          [ "$WARN_OUTCOME" = success ] || fail "warn-only outcome is '$WARN_OUTCOME'"
+          [ "$FAIL_OUTCOME" = failure ] || fail "fail-on-error outcome is '$FAIL_OUTCOME'"
+
+  # bin/pushme must run on the stock macOS /bin/bash 3.2.
+  macos:
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Commenting on pull requests would need write access.
-          GITLEAKS_ENABLE_COMMENTS: "false"
+      - name: Install bats
+        run: |
+          git clone -q --depth 1 --branch v1.14.0 https://github.com/bats-core/bats-core "$RUNNER_TEMP/bats"
+          echo "$RUNNER_TEMP/bats/bin" >>"$GITHUB_PATH"
+      - name: Check /bin/bash is 3.2
+        run: /bin/bash -c 'echo "$BASH_VERSION"; [ "${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}" = 3.2 ]'
+      - run: make test
