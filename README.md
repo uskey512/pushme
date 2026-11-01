@@ -84,6 +84,7 @@ pushme --dry-run -t タイトル 本文
 | `--markdown` | 本文を Markdown として表示する |
 | `--no-host` | ホスト名タグを付けない |
 | `-q, --quiet` | 成功時に何も表示しない |
+| `--ignore-dnd` | おやすみ時間（`PUSHME_DND`）でも送る |
 | `--dry-run` | 送信せず、送る内容を表示する（トピック名とトークンは伏せ字） |
 | `--` | これ以降の引数をすべてメッセージとして扱う |
 
@@ -133,6 +134,36 @@ cron は、ジョブが何か出力するとメールを送ります。成功時
 
 - cron の `PATH` は短いので、pushme はフルパスで書きます
 - 失敗の理由は `~/.local/state/pushme/error.log` に残ります
+
+## おやすみ時間
+
+決めた時間帯には通知を送らない（または音を鳴らさずに送る）ようにできます。`send`・`run`・Claude Code・Codex・GitHub Actions のどこから送る場合にも、Pushover で受け取る場合にも効きます。
+
+```sh
+# 設定ファイルに書く
+PUSHME_DND=23:00-07:00,12:00-13:00
+PUSHME_DND_MODE=quiet
+```
+
+- `PUSHME_DND` には `HH:MM-HH:MM` をカンマ区切りで書きます。終わりが始まりより前なら日をまたぎます。始まりの時刻は含み、終わりの時刻は含みません（`23:00-07:00` なら 23:00 から 6:59 まで）
+- `PUSHME_DND_MODE=skip`（既定）は送りません。`quiet` は優先度を 1（音もバイブも鳴らない）に下げて送ります
+- **優先度 5（`-p urgent`）の通知は、おやすみ時間でも送ります。** 緊急の通知を取りこぼさないためです
+- その場かぎりで無視したいときは、`send` や `run` に `--ignore-dnd` を付けます
+- 時刻はマシンのローカル時刻で判定します。別のタイムゾーンで判定したいときは `PUSHME_DND_TZ`（例 `Asia/Tokyo`）を指定します
+- 送らなかったときも終了コードは 0 です（`run` はコマンドの終了コード）。理由は標準エラー出力に出します（`-q` なら出しません）。今がおやすみ時間かどうかは `pushme doctor` で、何が起きるかは `--dry-run` で確かめられます
+- スマートフォン側のおやすみモード（Android の「サイレント モード」など）とは別の仕組みです。pushme の側で送らないので、ntfy.sh の 1 日 250 通の枠も使いません
+
+GitHub Actions のランナーの時刻は UTC なので、`PUSHME_DND_TZ` が必要です。ステップの `env:` に書きます。
+
+```yaml
+      - uses: uskey512/pushme@main
+        env:
+          PUSHME_DND: "23:00-07:00"
+          PUSHME_DND_TZ: Asia/Tokyo
+        with:
+          topic: ${{ secrets.NTFY_TOPIC }}
+          message: nightly build finished
+```
 
 ## コマンドの終了を通知する（run）
 
@@ -325,7 +356,7 @@ jobs:
 
 | 出力 | 説明 |
 |---|---|
-| `status` | `sent` / `dry-run` / `failed` のどれか |
+| `status` | `sent` / `skipped`（おやすみ時間で送らなかった）/ `dry-run` / `failed` のどれか |
 | `dry-run-output` | `dry-run` のときに表示した送信内容（トピック名とトークンは伏せ字） |
 
 ## Pushover で受け取る
@@ -385,6 +416,9 @@ PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_PUSHOVER_TOKEN` | なし | Pushover の API Token（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_USER` | なし | Pushover の User Key（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_DEVICE` | なし | 送る端末の名前（カンマ区切りで複数）。なければすべての端末 |
+| `PUSHME_DND` | なし | おやすみ時間。`HH:MM-HH:MM` をカンマ区切り（「おやすみ時間」の節を参照） |
+| `PUSHME_DND_MODE` | `skip` | おやすみ時間の動作。`skip`（送らない）または `quiet`（優先度 1 で送る） |
+| `PUSHME_DND_TZ` | マシンのローカル時刻 | おやすみ時間の判定に使うタイムゾーン（例 `Asia/Tokyo`） |
 | `PUSHME_CURL` | `curl` | 使う curl コマンド。**環境変数でだけ**指定できる（設定ファイルに書いても無視する） |
 
 設定ファイルは `0600`、それを置くディレクトリは `0700` にしてください。これより緩いと、送信時に警告を出します（送信は続けます）。設定ファイルを置かない環境では、環境変数 `PUSHME_NTFY_TOPIC` だけでも動きます。

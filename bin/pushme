@@ -57,6 +57,7 @@ send と run のオプション:
       --no-host          ホスト名タグを付けない
   -q, --quiet            成功時に何も表示しない（cron ではメールが届かないよう付ける）
       --dry-run          送信せず、送る内容を表示する（トピック名とトークンは伏せ字）
+      --ignore-dnd       おやすみ時間（PUSHME_DND）でも送る
 
 send:
   引数を空白でつないで本文にする。引数がなく標準入力が端末でなければ標準入力を読む。
@@ -321,6 +322,9 @@ cfg_reset() {
   cfg_codex_min_seconds=
   cfg_codex_include_message=
   cfg_codex_notify_permission=
+  cfg_dnd=
+  cfg_dnd_mode=
+  cfg_dnd_tz=
   cfg_pushover_token=
   cfg_pushover_user=
   cfg_pushover_device=
@@ -361,6 +365,9 @@ config_read_file() {
       PUSHME_CODEX_MIN_SECONDS) cfg_codex_min_seconds=$value ;;
       PUSHME_CODEX_INCLUDE_MESSAGE) cfg_codex_include_message=$value ;;
       PUSHME_CODEX_NOTIFY_PERMISSION) cfg_codex_notify_permission=$value ;;
+      PUSHME_DND) cfg_dnd=$value ;;
+      PUSHME_DND_MODE) cfg_dnd_mode=$value ;;
+      PUSHME_DND_TZ) cfg_dnd_tz=$value ;;
       PUSHME_PUSHOVER_TOKEN) cfg_pushover_token=$value ;;
       PUSHME_PUSHOVER_USER) cfg_pushover_user=$value ;;
       PUSHME_PUSHOVER_DEVICE) cfg_pushover_device=$value ;;
@@ -382,6 +389,9 @@ config_read_env() {
   if [ -n "${PUSHME_CODEX_MIN_SECONDS:-}" ]; then cfg_codex_min_seconds=$PUSHME_CODEX_MIN_SECONDS; fi
   if [ -n "${PUSHME_CODEX_INCLUDE_MESSAGE:-}" ]; then cfg_codex_include_message=$PUSHME_CODEX_INCLUDE_MESSAGE; fi
   if [ -n "${PUSHME_CODEX_NOTIFY_PERMISSION:-}" ]; then cfg_codex_notify_permission=$PUSHME_CODEX_NOTIFY_PERMISSION; fi
+  if [ -n "${PUSHME_DND:-}" ]; then cfg_dnd=$PUSHME_DND; fi
+  if [ -n "${PUSHME_DND_MODE:-}" ]; then cfg_dnd_mode=$PUSHME_DND_MODE; fi
+  if [ -n "${PUSHME_DND_TZ:-}" ]; then cfg_dnd_tz=$PUSHME_DND_TZ; fi
   if [ -n "${PUSHME_PUSHOVER_TOKEN:-}" ]; then cfg_pushover_token=$PUSHME_PUSHOVER_TOKEN; fi
   if [ -n "${PUSHME_PUSHOVER_USER:-}" ]; then cfg_pushover_user=$PUSHME_PUSHOVER_USER; fi
   if [ -n "${PUSHME_PUSHOVER_DEVICE:-}" ]; then cfg_pushover_device=$PUSHME_PUSHOVER_DEVICE; fi
@@ -431,6 +441,7 @@ load_config() {
   : "${cfg_ntfy_attach_max:=$NTFY_ATTACH_MAX_DEFAULT}"
   : "${cfg_claude_min_seconds:=30}" "${cfg_claude_include_message:=1}"
   : "${cfg_codex_min_seconds:=30}" "${cfg_codex_include_message:=1}" "${cfg_codex_notify_permission:=1}"
+  : "${cfg_dnd_mode:=skip}"
   while :; do
     case $cfg_ntfy_url in
       */) cfg_ntfy_url=${cfg_ntfy_url%/} ;;
@@ -492,6 +503,81 @@ config_check_codex() {
       return 1
       ;;
   esac
+}
+
+# --- do-not-disturb hours --------------------------------------------------------
+
+# Sets REPLY to the minutes since midnight of H:MM or HH:MM.
+dnd_parse_time() {
+  case $1 in
+    [0-9]:[0-5][0-9] | [01][0-9]:[0-5][0-9] | 2[0-3]:[0-5][0-9]) ;;
+    *) return 1 ;;
+  esac
+  REPLY=$((10#${1%%:*} * 60 + 10#${1#*:}))
+}
+
+# Sets REPLY to the current minutes since midnight, in PUSHME_DND_TZ when set.
+# PUSHME_TEST_NOW (HHMM) pins the clock for the test suite.
+dnd_now() {
+  local hhmm
+  if [ -n "${PUSHME_TEST_NOW:-}" ]; then
+    hhmm=$PUSHME_TEST_NOW
+  elif [ -n "$cfg_dnd_tz" ]; then
+    hhmm=$(TZ=$cfg_dnd_tz date +%H%M)
+  else
+    hhmm=$(date +%H%M)
+  fi
+  REPLY=$((10#${hhmm:0:2} * 60 + 10#${hhmm:2:2}))
+}
+
+# Checks the DnD settings. Given minutes since midnight in $1, also sets
+# dnd_range to the configured range containing that time ("" when none).
+# A range includes its start, excludes its end, and wraps past midnight when
+# the end comes first.
+config_check_dnd() {
+  local rest range start end
+  dnd_range=''
+  case $cfg_dnd_mode in
+    skip | quiet) ;;
+    *)
+      problem="PUSHME_DND_MODE は skip か quiet にしてください"
+      return 1
+      ;;
+  esac
+  case $cfg_dnd_tz in
+    *[!A-Za-z0-9_+:/.-]*)
+      problem="PUSHME_DND_TZ の形式が不正です（例 Asia/Tokyo）"
+      return 1
+      ;;
+  esac
+  rest=${cfg_dnd:+$cfg_dnd,}
+  while [ -n "$rest" ]; do
+    range=$(trim "${rest%%,*}")
+    rest=${rest#*,}
+    if ! dnd_parse_time "${range%%-*}"; then
+      problem="PUSHME_DND の形式が不正です: ${range}（HH:MM-HH:MM をカンマ区切り）"
+      return 1
+    fi
+    start=$REPLY
+    if [ "${range#*-}" = "$range" ] || ! dnd_parse_time "${range#*-}"; then
+      problem="PUSHME_DND の形式が不正です: ${range}（HH:MM-HH:MM をカンマ区切り）"
+      return 1
+    fi
+    end=$REPLY
+    if [ "$start" -eq "$end" ]; then
+      problem="PUSHME_DND の始まりと終わりが同じです: ${range}"
+      return 1
+    fi
+    if [ -n "$dnd_range" ] || [ -z "${1:-}" ]; then
+      continue
+    fi
+    if [ "$start" -lt "$end" ]; then
+      [ "$1" -ge "$start" ] && [ "$1" -lt "$end" ] && dnd_range=$range
+    else
+      { [ "$1" -ge "$start" ] || [ "$1" -lt "$end" ]; } && dnd_range=$range
+    fi
+  done
+  return 0
 }
 
 # --- HTTP --------------------------------------------------------------------
@@ -952,6 +1038,7 @@ reset_message_options() {
   opt_no_host=0
   opt_quiet=0
   opt_dry_run=0
+  opt_ignore_dnd=0
 }
 
 value_option() {
@@ -984,6 +1071,7 @@ parse_message_option() {
     --no-host) opt_no_host=1 ;;
     -q | --quiet) opt_quiet=1 ;;
     --dry-run) opt_dry_run=1 ;;
+    --ignore-dnd) opt_ignore_dnd=1 ;;
     *) OPT_SHIFT=0 ;;
   esac
 }
@@ -1028,7 +1116,44 @@ load_valid_config() {
     problem="設定ファイルを読めません: $cfg_file"
     return 1
   fi
-  config_check_common && "backend_${cfg_backend}_validate"
+  config_check_common && "backend_${cfg_backend}_validate" && config_check_dnd
+}
+
+# Sends msg_* through the backend unless the do-not-disturb hours hold it
+# back, in which case dnd_skipped=1 and the return value is 0. Priority 5
+# always goes through.
+deliver_message() {
+  local range
+  dnd_skipped=0
+  if [ -n "$cfg_dnd" ]; then
+    dnd_now
+    config_check_dnd "$REPLY" || return 1
+  else
+    dnd_range=''
+  fi
+  range=$dnd_range
+  if [ -n "$range" ] && [ "$opt_ignore_dnd" != 1 ] && [ "$msg_priority" != 5 ]; then
+    if [ "$cfg_dnd_mode" = skip ]; then
+      dnd_skipped=1
+      if [ "$opt_dry_run" = 1 ]; then
+        printf 'pushme: dry-run: おやすみ時間（%s）のため送りません\n' "$range"
+      elif [ "$opt_quiet" != 1 ]; then
+        printf 'pushme: おやすみ時間（%s）のため送りませんでした\n' "$range" >&2
+      fi
+      return 0
+    fi
+    msg_priority=1
+    if [ "$opt_dry_run" = 1 ]; then printf 'おやすみ時間（%s）: 優先度 1 で送ります\n' "$range"; fi
+  elif [ "$opt_dry_run" = 1 ] && [ -n "$cfg_dnd" ]; then
+    if [ -z "$range" ]; then
+      printf 'おやすみ時間: 対象外\n'
+    elif [ "$opt_ignore_dnd" = 1 ]; then
+      printf 'おやすみ時間（%s）: --ignore-dnd のため送ります\n' "$range"
+    else
+      printf 'おやすみ時間（%s）: 優先度 5 のため送ります\n' "$range"
+    fi
+  fi
+  "backend_${cfg_backend}_send"
 }
 
 set_message_host() {
@@ -1103,8 +1228,8 @@ cmd_send() {
     die "$EX_USAGE" "添付ファイルを読めません: $msg_attach"
   fi
 
-  "backend_${cfg_backend}_send" || exit "$EX_FAIL"
-  if [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+  deliver_message || exit "$EX_FAIL"
+  if [ "$dnd_skipped" != 1 ] && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
     printf '%s\n' 'pushme: 送信しました'
   fi
 }
@@ -1284,7 +1409,7 @@ cmd_run() {
   if [ "$can_notify" = 1 ]; then
     run_build_message "$rc" "$elapsed" "$tail_lines" "$output" "$@"
     # stdout belongs to the command, so pushme's own report goes to stderr.
-    if "backend_${cfg_backend}_send" && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+    if deliver_message && [ "$dnd_skipped" != 1 ] && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
       printf '%s\n' 'pushme: 通知を送りました' >&2
     fi
   fi
@@ -1500,7 +1625,7 @@ hook_send() {
   msg_tags=$2${hook_project_tag:+,$hook_project_tag}
   msg_body=$3
   set_message_host
-  "backend_${cfg_backend}_send"
+  deliver_message
 }
 
 claude_hook_handle() {
@@ -1695,6 +1820,20 @@ cmd_doctor() {
   fi
   config_check_claude || doctor_report NG "$problem"
   config_check_codex || doctor_report NG "$problem"
+  REPLY=''
+  [ -z "$cfg_dnd" ] || dnd_now
+  if ! config_check_dnd "$REPLY"; then
+    doctor_report NG "$problem"
+  elif [ -z "$cfg_dnd" ]; then
+    doctor_report -- "おやすみ時間: 設定なし"
+  else
+    doctor_report OK "おやすみ時間: ${cfg_dnd}（${cfg_dnd_mode}、タイムゾーン ${cfg_dnd_tz:-マシンのローカル時刻}）"
+    if [ -n "$dnd_range" ]; then
+      doctor_report -- "現在はおやすみ時間中です（${dnd_range}）"
+    else
+      doctor_report -- "現在はおやすみ時間の対象外です"
+    fi
+  fi
 
   if [ "$doctor_ng" -gt 0 ]; then
     printf '問題が %d 件あります\n' "$doctor_ng"

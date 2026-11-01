@@ -53,6 +53,35 @@ jobs:
             case $OUTPUT in *"$want"*) ;; *) fail "missing: $want" ;; esac
           done
 
+      # A range around the current hour in Tokyo, so this checks the real
+      # PUSHME_DND_TZ path without depending on when the job runs.
+      - id: dnd-range
+        run: |
+          hour=$(TZ=Asia/Tokyo date +%H)
+          hour=$((10#$hour))
+          echo "range=$(((hour + 23) % 24)):00-$(((hour + 2) % 24)):00" >>"$GITHUB_OUTPUT"
+
+      - id: dnd
+        uses: ./
+        env:
+          PUSHME_DND: ${{ steps.dnd-range.outputs.range }}
+          PUSHME_DND_TZ: Asia/Tokyo
+        with:
+          message: the do-not-disturb hours must hold this back
+          topic: ${{ env.SELFTEST_TOPIC }}
+          dry-run: true
+
+      - name: Check the do-not-disturb hours
+        env:
+          OUTPUT: ${{ steps.dnd.outputs.dry-run-output }}
+          RANGE: ${{ steps.dnd-range.outputs.range }}
+        run: |
+          printf '%s\n' "$OUTPUT"
+          case $OUTPUT in
+            *"おやすみ時間（${RANGE}）のため送りません"*) ;;
+            *) echo "::error::the message was not held back"; exit 1 ;;
+          esac
+
       - id: warn-only
         uses: ./
         with:
