@@ -1,0 +1,7 @@
+# A config file or env file copied into the repository by mistake would leak the topic.
+/config
+*.env
+.env*
+
+*.log
+.DS_Store

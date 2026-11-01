@@ -1,0 +1,7 @@
+# Comments, blank lines, indentation, spaces around "=" and quoting.
+   # indented comment
+
+PUSHME_NTFY_TOPIC = "pushme-test-topic-not-real"
+PUSHME_NTFY_URL='https://ntfy.example.test/'
+  PUSHME_HOSTNAME=  filehost
+PUSHME_TIMEOUT=7
