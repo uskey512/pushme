@@ -86,9 +86,10 @@ errors=$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pushme-action.XXXXXX") || fail 
 output=$("$root/bin/pushme" send "${args[@]}" 2>"$errors" </dev/null)
 status=$?
 if [ -n "$output" ]; then printf '%s\n' "$output"; fi
-cat "$errors" >&2
-detail=$(tail -n 1 "$errors")
+diagnostics=$(cat "$errors")
 rm -f "$errors"
+if [ -n "$diagnostics" ]; then printf '%s\n' "$diagnostics" >&2; fi
+detail=${diagnostics##*$'\n'}
 
 if [ "$status" -ne 0 ]; then
   fail "${detail#pushme: エラー: }"
@@ -97,5 +98,9 @@ if [ "$dry_run" = 1 ]; then
   set_output status dry-run
   set_output dry-run-output "$output"
 else
-  set_output status sent
+  case $diagnostics in
+    # pushme exits 0 when the do-not-disturb hours hold a message back.
+    *'のため送りませんでした'*) set_output status skipped ;;
+    *) set_output status sent ;;
+  esac
 fi

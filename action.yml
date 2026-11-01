@@ -61,7 +61,7 @@ inputs:
 
 outputs:
   status:
-    description: sent / dry-run / failed のどれか
+    description: sent / skipped（おやすみ時間で送らなかった）/ dry-run / failed のどれか
     value: ${{ steps.send.outputs.status }}
   dry-run-output:
     description: dry-run のときに表示した送信内容

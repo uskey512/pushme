@@ -175,6 +175,18 @@ output_value() {
   [[ $output == *"::add-mask::$user"* ]] || false
 }
 
+@test "action: PUSHME_DND on the step holds the message back and reports skipped" {
+  setup_action
+  export PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=2330
+  run_action
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(output_value status)" = skipped ]
+  export INPUT_DRY_RUN=true
+  run_action
+  [ "$(output_value dry-run-output)" = "pushme: dry-run: おやすみ時間（23:00-07:00）のため送りません" ]
+}
+
 @test "action: works without GITHUB_OUTPUT" {
   setup_action
   unset GITHUB_OUTPUT
