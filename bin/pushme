@@ -1,0 +1,803 @@
+#!/usr/bin/env bash
+# pushme: send push notifications to your phone through ntfy.
+# Must keep running on bash 3.2 (macOS /bin/bash): no associative arrays,
+# ${var,,}, mapfile or namerefs.
+
+set -u
+
+# Byte semantics for ${#var}, substring slicing and [A-Z] ranges.
+export LC_ALL=C
+
+PUSHME_VERSION=0.1.0
+EX_FAIL=1
+EX_USAGE=2
+ERROR_LOG_MAX=102400
+NTFY_DEFAULT_URL=https://ntfy.sh
+# ntfy delivers a body over 4,096 bytes as a file attachment instead of
+# notification text.
+NTFY_BODY_MAX=4000
+TOPIC_RULE='英数字・「-」・「_」の 1〜64 文字'
+
+usage() {
+  cat <<'EOF'
+pushme — スマートフォンにプッシュ通知を送る（ntfy）
+
+使い方:
+  pushme [send] [オプション] [メッセージ...]
+  pushme init [--force] [--no-test]
+  pushme doctor
+  pushme help | version
+
+send のオプション:
+  -t, --title TEXT       タイトル
+  -p, --priority VALUE   優先度。1〜5 または min / low / default / high / urgent
+  -T, --tags a,b         タグ（カンマ区切り。繰り返し指定できる）。末尾にホスト名タグが付く
+  -c, --click URL        通知をタップしたときに開く URL
+      --markdown         本文を Markdown として表示する
+      --no-host          ホスト名タグを付けない
+  -q, --quiet            成功時に何も表示しない
+      --dry-run          送信せず、送る内容を表示する（トピック名とトークンは伏せ字）
+      --                 これ以降の引数をすべてメッセージとして扱う
+
+メッセージ:
+  引数を空白でつないで本文にする。引数がなく標準入力が端末でなければ標準入力を読む。
+  「-」だけを指定したときも標準入力を読む。4,000 バイトを超える本文は切り詰める。
+
+init のオプション:
+  --force     既存の設定ファイルを作り直す
+  --no-test   最後にテスト通知を送るか尋ねない
+
+終了コード: 0 = 成功、1 = 送信の失敗、2 = 使い方の誤り・設定の不足
+設定ファイル: ~/.config/pushme/config（XDG_CONFIG_HOME や PUSHME_CONFIG で変更できる）
+EOF
+}
+
+# --- output and logging ---------------------------------------------------
+
+warn() { printf 'pushme: 警告: %s\n' "$1" >&2; }
+
+# Errors are also logged because pushme usually runs where stderr is thrown
+# away (cron jobs, editor hooks).
+err() {
+  printf 'pushme: エラー: %s\n' "$1" >&2
+  log_error "$1"
+}
+
+die() {
+  err "$2"
+  exit "$1"
+}
+
+log_error() {
+  local dir file size
+  dir=${XDG_STATE_HOME:-${HOME:-}/.local/state}/pushme
+  file=$dir/error.log
+  {
+    if [ ! -d "$dir" ]; then
+      mkdir -p "$dir" && chmod 700 "$dir"
+    fi
+    printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$1" >>"$file"
+    size=$(wc -c <"$file")
+    if [ "$size" -gt "$ERROR_LOG_MAX" ]; then
+      tail -c $((ERROR_LOG_MAX / 2)) "$file" | {
+        IFS= read -r _
+        cat
+      } >"$file.tmp" && mv -f "$file.tmp" "$file"
+    fi
+  } 2>/dev/null
+  return 0
+}
+
+# Shows a few leading characters of a secret and its length, never the rest.
+mask() {
+  local s=$1 keep
+  keep=$((${#s} / 8))
+  [ "$keep" -le 7 ] || keep=7
+  printf '%s…(%d chars)' "${s:0:keep}" "${#s}"
+}
+
+redact() {
+  local s=$1 secret masked
+  for secret in "$cfg_ntfy_topic" "$cfg_ntfy_token"; do
+    [ -n "$secret" ] || continue
+    masked=$(mask "$secret")
+    s=${s//"$secret"/"$masked"}
+  done
+  printf '%s' "$s"
+}
+
+# --- small helpers ---------------------------------------------------------
+
+trim() {
+  local s=$1
+  s=${s#"${s%%[![:space:]]*}"}
+  s=${s%"${s##*[![:space:]]}"}
+  printf '%s' "$s"
+}
+
+unquote() {
+  local s=$1
+  case $s in
+    \"*\" | \'*\') s=${s:1:${#s}-2} ;;
+  esac
+  printf '%s' "$s"
+}
+
+join_words() {
+  local IFS=' '
+  REPLY="$*"
+}
+
+is_blank() {
+  case $1 in
+    *[![:space:]]*) return 1 ;;
+  esac
+  return 0
+}
+
+valid_topic() {
+  case $1 in
+    '' | *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+normalize_priority() {
+  case $(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') in
+    1 | min) REPLY=1 ;;
+    2 | low) REPLY=2 ;;
+    3 | default) REPLY=3 ;;
+    4 | high) REPLY=4 ;;
+    5 | urgent | max) REPLY=5 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Splits on commas, trims each tag and drops empty ones.
+normalize_tags() {
+  local rest=$1, tag out=''
+  while [ -n "$rest" ]; do
+    tag=$(trim "${rest%%,*}")
+    rest=${rest#*,}
+    [ -n "$tag" ] && out=${out:+$out,}$tag
+  done
+  REPLY=$out
+}
+
+# Cuts $1 to at most $2 bytes including a trailing "…", without splitting a
+# UTF-8 sequence. Pure bash because head -c and iconv differ between macOS
+# and Linux.
+truncate_utf8() {
+  local s=$1 max=$2 ellipsis=$'\xe2\x80\xa6' n i need
+  if [ "${#s}" -le "$max" ]; then
+    REPLY=$s
+    return
+  fi
+  s=${s:0:max-${#ellipsis}}
+  n=${#s}
+  i=$((n - 1))
+  while [ "$i" -gt 0 ] && [ $((n - i)) -le 3 ]; do
+    case ${s:i:1} in
+      [$'\x80'-$'\xbf']) i=$((i - 1)) ;;
+      *) break ;;
+    esac
+  done
+  case ${s:i:1} in
+    [$'\xc0'-$'\xdf']) need=2 ;;
+    [$'\xe0'-$'\xef']) need=3 ;;
+    [$'\xf0'-$'\xf7']) need=4 ;;
+    *) need=1 ;;
+  esac
+  [ $((n - i)) -ge "$need" ] || s=${s:0:i}
+  REPLY=$s$ellipsis
+}
+
+# Some HTTP stacks mangle raw UTF-8 in headers, and ntfy decodes RFC 2047
+# encoded-words in every header (https://docs.ntfy.sh/publish/#list-of-all-parameters).
+# Values containing "=?" are encoded too, or the server would decode them.
+header_value() {
+  case $1 in
+    *[!\ -~]* | *'=?'*)
+      REPLY="=?UTF-8?B?$(printf '%s' "$1" | base64 | tr -d '\n')?="
+      ;;
+    *) REPLY=$1 ;;
+  esac
+}
+
+default_hostname() {
+  local h
+  h=$(hostname -s 2>/dev/null) || h=
+  [ -n "$h" ] || h=$(uname -n 2>/dev/null)
+  printf '%s' "${h%%.*}"
+}
+
+file_mode() {
+  stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
+}
+
+# --- configuration ---------------------------------------------------------
+
+config_path() {
+  printf '%s' "${PUSHME_CONFIG:-${XDG_CONFIG_HOME:-${HOME:-}/.config}/pushme/config}"
+}
+
+cfg_reset() {
+  cfg_backend=
+  cfg_ntfy_url=
+  cfg_ntfy_topic=
+  cfg_ntfy_token=
+  cfg_hostname=
+  cfg_timeout=
+  cfg_curl=
+  cfg_file=
+  cfg_file_state=missing
+  cfg_unknown=()
+  cfg_malformed=()
+  cfg_perm_problems=()
+}
+
+# Parsed line by line instead of sourced, so a value such as $(...) stays a
+# literal string and the file can never run code.
+config_read_file() {
+  local line key value lineno=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    line=$(trim "$line")
+    case $line in
+      '' | '#'*) continue ;;
+      *=*) ;;
+      *)
+        cfg_malformed+=("$lineno")
+        continue
+        ;;
+    esac
+    key=$(trim "${line%%=*}")
+    value=$(unquote "$(trim "${line#*=}")")
+    case $key in
+      PUSHME_BACKEND) cfg_backend=$value ;;
+      PUSHME_NTFY_URL) cfg_ntfy_url=$value ;;
+      PUSHME_NTFY_TOPIC) cfg_ntfy_topic=$value ;;
+      PUSHME_NTFY_TOKEN) cfg_ntfy_token=$value ;;
+      PUSHME_HOSTNAME) cfg_hostname=$value ;;
+      PUSHME_TIMEOUT) cfg_timeout=$value ;;
+      PUSHME_CURL) cfg_curl=$value ;;
+      *) cfg_unknown+=("$lineno:$key") ;;
+    esac
+  done <"$1"
+}
+
+config_read_env() {
+  if [ -n "${PUSHME_BACKEND:-}" ]; then cfg_backend=$PUSHME_BACKEND; fi
+  if [ -n "${PUSHME_NTFY_URL:-}" ]; then cfg_ntfy_url=$PUSHME_NTFY_URL; fi
+  if [ -n "${PUSHME_NTFY_TOPIC:-}" ]; then cfg_ntfy_topic=$PUSHME_NTFY_TOPIC; fi
+  if [ -n "${PUSHME_NTFY_TOKEN:-}" ]; then cfg_ntfy_token=$PUSHME_NTFY_TOKEN; fi
+  if [ -n "${PUSHME_HOSTNAME:-}" ]; then cfg_hostname=$PUSHME_HOSTNAME; fi
+  if [ -n "${PUSHME_TIMEOUT:-}" ]; then cfg_timeout=$PUSHME_TIMEOUT; fi
+  if [ -n "${PUSHME_CURL:-}" ]; then cfg_curl=$PUSHME_CURL; fi
+}
+
+config_check_perms() {
+  local file=$1 dir mode
+  dir=$(dirname "$file")
+  mode=$(file_mode "$file")
+  case $mode in
+    '' | *[!0-7]*) ;;
+    *)
+      if [ $((8#$mode & 8#077)) -ne 0 ]; then
+        cfg_perm_problems+=("設定ファイル $file のパーミッションが $mode です（chmod 600 で他人から読めないようにしてください）")
+      fi
+      ;;
+  esac
+  mode=$(file_mode "$dir")
+  case $mode in
+    '' | *[!0-7]*) ;;
+    *)
+      if [ $((8#$mode & 8#077)) -ne 0 ]; then
+        cfg_perm_problems+=("設定ディレクトリ $dir のパーミッションが $mode です（chmod 700 を推奨）")
+      fi
+      ;;
+  esac
+}
+
+# Later sources win: config file < PUSHME_* environment < command-line options.
+# An empty value counts as unset everywhere.
+load_config() {
+  cfg_reset
+  cfg_file=$(config_path)
+  if [ -f "$cfg_file" ]; then
+    if [ -r "$cfg_file" ]; then
+      cfg_file_state=ok
+      config_read_file "$cfg_file"
+    else
+      cfg_file_state=unreadable
+    fi
+    config_check_perms "$cfg_file"
+  fi
+  config_read_env
+  : "${cfg_backend:=ntfy}" "${cfg_ntfy_url:=$NTFY_DEFAULT_URL}" "${cfg_timeout:=10}" "${cfg_curl:=curl}"
+  while :; do
+    case $cfg_ntfy_url in
+      */) cfg_ntfy_url=${cfg_ntfy_url%/} ;;
+      *) break ;;
+    esac
+  done
+}
+
+config_check_common() {
+  case $cfg_backend in
+    '' | *[!a-z0-9_]*)
+      problem="PUSHME_BACKEND の値が不正です"
+      return 1
+      ;;
+  esac
+  if [ "$(type -t "backend_${cfg_backend}_send")" != function ]; then
+    problem="PUSHME_BACKEND=$cfg_backend には対応していません（使えるのは ntfy）"
+    return 1
+  fi
+  case $cfg_timeout in
+    '' | *[!0-9]*)
+      problem="PUSHME_TIMEOUT は 1 以上の整数（秒）にしてください"
+      return 1
+      ;;
+  esac
+  if [ $((10#$cfg_timeout)) -lt 1 ]; then
+    problem="PUSHME_TIMEOUT は 1 以上の整数（秒）にしてください"
+    return 1
+  fi
+}
+
+# --- HTTP --------------------------------------------------------------------
+
+# Request details reach curl through --config on stdin, not argv, so the topic
+# and token never appear in `ps` output.
+curl_conf_add() {
+  local s=$2 bs=\\ dq='"' nl=$'\n' cr=$'\r' tab=$'\t' vt=$'\v'
+  s=${s//"$bs"/"$bs$bs"}
+  s=${s//"$dq"/"$bs$dq"}
+  s=${s//"$nl"/"${bs}n"}
+  s=${s//"$cr"/"${bs}r"}
+  s=${s//"$tab"/"${bs}t"}
+  s=${s//"$vt"/"${bs}v"}
+  curl_conf="$curl_conf$1 = \"$s\"$nl"
+}
+
+# Sends the request in $curl_conf. Returns 0 when the server accepted it.
+curl_send_conf() {
+  local marker=__PUSHME_HTTP_STATUS__ attempt=1 res rc status detail
+  if ! command -v "$cfg_curl" >/dev/null 2>&1; then
+    err "curl が見つかりません（$cfg_curl）"
+    return 1
+  fi
+  while :; do
+    res=$(printf '%s' "$curl_conf" | "$cfg_curl" --silent --show-error --fail \
+      --connect-timeout 3 --max-time "$cfg_timeout" \
+      --output /dev/null --write-out "$marker%{http_code}" --config - 2>&1)
+    rc=$?
+    # Only a refused connection is retried: the request never reached the
+    # server, so it cannot be delivered twice. HTTP 429 in particular is not
+    # retried, since ntfy.sh may ban clients that keep exceeding its limits.
+    if [ "$rc" -eq 7 ] && [ "$attempt" -lt 2 ]; then
+      attempt=$((attempt + 1))
+      sleep 1
+      continue
+    fi
+    break
+  done
+  status=${res##*"$marker"}
+  status=${status:0:3}
+  case $status in
+    [0-9][0-9][0-9]) res=${res/"$marker$status"/} ;;
+    *) status=000 ;;
+  esac
+  if [ "$rc" -eq 0 ]; then
+    case $status in
+      2??) return 0 ;;
+    esac
+  fi
+  res=$(trim "$(printf '%s' "$res" | tr '\r\n' '  ')")
+  case $status in
+    429) detail="HTTP 429（ntfy のレート制限に達しました。再試行はしません）" ;;
+    3??) detail="HTTP $status（リダイレクト先には送りません。PUSHME_NTFY_URL を確認してください）" ;;
+    [45]??) detail="HTTP $status" ;;
+    *) detail=${res:-"curl が終了コード $rc で失敗しました"} ;;
+  esac
+  err "送信に失敗しました: $(redact "$detail")"
+  return 1
+}
+
+# --- ntfy backend ------------------------------------------------------------
+# PUSHME_BACKEND=<name> dispatches to these functions:
+#   backend_<name>_validate  check the configuration; on failure set $problem, return 1
+#   backend_<name>_send      deliver msg_* (print them when opt_dry_run=1); 0 = sent, 1 = failed
+#   backend_<name>_doctor    report checks through doctor_report without sending anything
+
+backend_ntfy_validate() {
+  if [ -z "$cfg_ntfy_topic" ]; then
+    problem="PUSHME_NTFY_TOPIC が未設定です（pushme init で作成できます）"
+    return 1
+  fi
+  if ! valid_topic "$cfg_ntfy_topic"; then
+    problem="PUSHME_NTFY_TOPIC の形式が不正です（$TOPIC_RULE）"
+    return 1
+  fi
+  case $cfg_ntfy_url in
+    http://?* | https://?*) ;;
+    *)
+      problem="PUSHME_NTFY_URL は http:// か https:// で始まる URL にしてください"
+      return 1
+      ;;
+  esac
+  case $cfg_ntfy_token in
+    *[!\!-~]*)
+      problem="PUSHME_NTFY_TOKEN に使えない文字（空白・制御文字・非 ASCII）が含まれています"
+      return 1
+      ;;
+  esac
+}
+
+backend_ntfy_send() {
+  local url tags body
+  url=$cfg_ntfy_url/$cfg_ntfy_topic
+  tags=$msg_tags
+  [ -z "$msg_host" ] || tags=${tags:+$tags,}$msg_host
+  truncate_utf8 "$msg_body" "$NTFY_BODY_MAX"
+  body=$REPLY
+
+  if [ "$opt_dry_run" = 1 ]; then
+    printf '%s\n' 'pushme: dry-run（送信していません）'
+    printf 'POST %s\n' "$(redact "$url")"
+    if [ -n "$msg_title" ]; then printf 'X-Title: %s\n' "$msg_title"; fi
+    if [ -n "$msg_priority" ]; then printf 'X-Priority: %s\n' "$msg_priority"; fi
+    if [ -n "$tags" ]; then printf 'X-Tags: %s\n' "$tags"; fi
+    if [ -n "$msg_click" ]; then printf 'X-Click: %s\n' "$msg_click"; fi
+    if [ "$msg_markdown" = 1 ]; then printf 'X-Markdown: yes\n'; fi
+    if [ -n "$cfg_ntfy_token" ]; then printf 'Authorization: Bearer %s\n' "$(mask "$cfg_ntfy_token")"; fi
+    printf -- '--- 本文（%d バイト）---\n%s\n' "${#body}" "$body"
+    return 0
+  fi
+
+  curl_conf=
+  curl_conf_add url "$url"
+  if [ -n "$msg_title" ]; then
+    header_value "$msg_title"
+    curl_conf_add header "X-Title: $REPLY"
+  fi
+  if [ -n "$msg_priority" ]; then curl_conf_add header "X-Priority: $msg_priority"; fi
+  if [ -n "$tags" ]; then
+    header_value "$tags"
+    curl_conf_add header "X-Tags: $REPLY"
+  fi
+  if [ -n "$msg_click" ]; then
+    header_value "$msg_click"
+    curl_conf_add header "X-Click: $REPLY"
+  fi
+  if [ "$msg_markdown" = 1 ]; then curl_conf_add header "X-Markdown: yes"; fi
+  if [ -n "$cfg_ntfy_token" ]; then curl_conf_add header "Authorization: Bearer $cfg_ntfy_token"; fi
+  # data-raw: a body starting with "@" must not be read as a file name.
+  curl_conf_add data-raw "$body"
+  curl_send_conf
+}
+
+backend_ntfy_doctor() {
+  local url_ok=1 res rc
+  if [ -z "$cfg_ntfy_topic" ]; then
+    doctor_report NG "トピック名: 未設定です（pushme init で作成できます）"
+  elif ! valid_topic "$cfg_ntfy_topic"; then
+    doctor_report NG "トピック名: 形式が不正です（$TOPIC_RULE）"
+  else
+    doctor_report OK "トピック名: 設定済み（${#cfg_ntfy_topic} 文字。値は表示しません）"
+  fi
+  case $cfg_ntfy_url in
+    http://?* | https://?*) doctor_report OK "ntfy サーバー: $cfg_ntfy_url" ;;
+    *)
+      url_ok=0
+      doctor_report NG "ntfy サーバー: PUSHME_NTFY_URL は http:// か https:// で始まる URL にしてください"
+      ;;
+  esac
+  if [ -n "$cfg_ntfy_token" ]; then
+    case $cfg_ntfy_token in
+      *[!\!-~]*) doctor_report NG "アクセストークン: 使えない文字（空白・制御文字・非 ASCII）が含まれています" ;;
+      *) doctor_report OK "アクセストークン: 設定済み（${#cfg_ntfy_token} 文字。値は表示しません）" ;;
+    esac
+  fi
+  [ "$url_ok" = 1 ] || return 0
+  if ! command -v "$cfg_curl" >/dev/null 2>&1; then
+    doctor_report NG "疎通: curl がないため確認できません"
+    return 0
+  fi
+  # /v1/health answers without publishing, so the check does not use up the
+  # daily message quota.
+  res=$("$cfg_curl" --silent --show-error --fail --connect-timeout 3 \
+    --max-time "$cfg_timeout" "$cfg_ntfy_url/v1/health" 2>&1)
+  rc=$?
+  case $rc:$res in
+    0:*'"healthy":true'* | 0:*'"healthy": true'*)
+      doctor_report OK "疎通: $cfg_ntfy_url/v1/health に接続できました（通知は送っていません）"
+      ;;
+    0:*) doctor_report NG "疎通: $cfg_ntfy_url/v1/health が healthy を返しませんでした" ;;
+    *) doctor_report NG "疎通: $cfg_ntfy_url/v1/health に接続できません: $(trim "$(printf '%s' "$res" | tr '\r\n' '  ')")" ;;
+  esac
+}
+
+# --- commands --------------------------------------------------------------
+
+cmd_send() {
+  local title='' priority='' priority_set=0 tags='' click='' markdown=0 no_host=0 body
+  local args=()
+  opt_quiet=0
+  opt_dry_run=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --title=* | --priority=* | --tags=* | --click=*)
+        set -- "${1%%=*}" "${1#*=}" "${@:2}"
+        continue
+        ;;
+      -t | --title | -p | --priority | -T | --tags | -c | --click)
+        [ $# -ge 2 ] || die "$EX_USAGE" "$1 には値が必要です"
+        case $1 in
+          -t | --title) title=$2 ;;
+          -p | --priority) priority=$2 priority_set=1 ;;
+          -T | --tags) tags=${tags:+$tags,}$2 ;;
+          -c | --click) click=$2 ;;
+        esac
+        shift
+        ;;
+      --markdown) markdown=1 ;;
+      --no-host) no_host=1 ;;
+      -q | --quiet) opt_quiet=1 ;;
+      --dry-run) opt_dry_run=1 ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -) break ;;
+      -?*) die "$EX_USAGE" "不明なオプションです: $1（pushme help を参照）" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  args=("$@")
+
+  msg_priority=
+  if [ "$priority_set" = 1 ]; then
+    normalize_priority "$priority" ||
+      die "$EX_USAGE" "優先度の値が不正です: $priority（1〜5 または min / low / default / high / urgent）"
+    msg_priority=$REPLY
+  fi
+  normalize_tags "$tags"
+  msg_tags=$REPLY
+  msg_title=$title
+  msg_click=$click
+  msg_markdown=$markdown
+
+  load_config
+  if [ "$cfg_file_state" = unreadable ]; then
+    die "$EX_USAGE" "設定ファイルを読めません: $cfg_file"
+  fi
+  local p
+  for p in ${cfg_perm_problems[@]+"${cfg_perm_problems[@]}"}; do
+    warn "$p"
+  done
+  config_check_common || die "$EX_USAGE" "$problem"
+  "backend_${cfg_backend}_validate" || die "$EX_USAGE" "$problem"
+
+  if [ "$no_host" = 1 ]; then
+    msg_host=
+  else
+    msg_host=${cfg_hostname:-$(default_hostname)}
+  fi
+
+  if [ ${#args[@]} -eq 1 ] && [ "${args[0]}" = - ]; then
+    body=$(cat)
+  elif [ ${#args[@]} -gt 0 ]; then
+    join_words "${args[@]}"
+    body=$REPLY
+  elif [ ! -t 0 ]; then
+    body=$(cat)
+  else
+    body=
+  fi
+  if is_blank "$body"; then
+    die "$EX_USAGE" "本文が空です（引数か標準入力で渡してください）"
+  fi
+  msg_body=$body
+
+  "backend_${cfg_backend}_send" || exit "$EX_FAIL"
+  if [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+    printf '%s\n' 'pushme: 送信しました'
+  fi
+}
+
+generate_topic() {
+  local rand
+  rand=$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 59)
+  [ "${#rand}" -eq 59 ] || return 1
+  printf 'ntfy-%s' "$rand"
+}
+
+config_template() {
+  cat <<EOF
+# pushme の設定ファイル（KEY=VALUE 形式。シェルスクリプトとしては実行されない）
+# トピック名はパスワードと同じように扱うこと
+PUSHME_NTFY_TOPIC=$1
+
+# PUSHME_NTFY_URL=$NTFY_DEFAULT_URL
+# PUSHME_NTFY_TOKEN=
+# PUSHME_HOSTNAME=
+# PUSHME_TIMEOUT=10
+EOF
+}
+
+# Sets modes explicitly rather than trusting the caller's umask.
+write_config() {
+  local file=$1 topic=$2 dir tmp
+  dir=$(dirname "$file")
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir" || return 1
+    chmod 700 "$dir" || return 1
+  fi
+  tmp=$file.tmp.$$
+  (umask 077 && : >"$tmp") || return 1
+  if ! chmod 600 "$tmp" || ! config_template "$topic" >"$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  mv -f "$tmp" "$file" && chmod 600 "$file"
+}
+
+cmd_init() {
+  local force=0 ask_test=1 file topic='' answer generated=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --force) force=1 ;;
+      --no-test) ask_test=0 ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      *) die "$EX_USAGE" "init に不明な引数があります: $1（トピック名は引数ではなく標準入力から渡してください）" ;;
+    esac
+    shift
+  done
+
+  file=$(config_path)
+  if [ -e "$file" ] && [ "$force" = 0 ]; then
+    printf 'pushme: 設定ファイルは既にあります: %s（作り直すには pushme init --force）\n' "$file"
+    return 0
+  fi
+
+  # The topic is read from stdin only, never from argv, so it stays out of
+  # shell history.
+  if [ -t 0 ]; then
+    printf '既存のトピック名を貼り付けて Enter（空のまま Enter で新規生成）: ' >&2
+    IFS= read -r -s topic || :
+    printf '\n' >&2
+  else
+    IFS= read -r topic || :
+  fi
+  topic=$(trim "$topic")
+
+  if [ -z "$topic" ]; then
+    topic=$(generate_topic) || die "$EX_FAIL" "トピック名を生成できませんでした（/dev/urandom を読めません）"
+    generated=1
+  elif ! valid_topic "$topic"; then
+    die "$EX_USAGE" "トピック名の形式が不正です（$TOPIC_RULE）"
+  fi
+
+  write_config "$file" "$topic" || die "$EX_FAIL" "設定ファイルを書き込めませんでした: $file"
+  printf '設定ファイルを作成しました: %s\n' "$file"
+  load_config
+
+  if [ "$generated" = 1 ]; then
+    cat <<EOF
+
+新しいトピック名を生成しました。表示するのはこの 1 回だけです。
+パスワード管理ツールに保存してください（知っている人は誰でも通知を送れて、読めます）。
+
+  $topic
+
+Android 側の準備:
+  1. ntfy アプリを入れる（Google Play または F-Droid）
+  2. アプリの「+」から購読を追加し、「トピック名」に上の文字列を貼り付ける
+EOF
+    if [ "$cfg_ntfy_url" = "$NTFY_DEFAULT_URL" ]; then
+      printf '  3. 「別のサーバーを使う」はオフのまま「購読」を押す\n'
+    else
+      printf '  3. 「別のサーバーを使う」をオンにして %s を入力し、「購読」を押す\n' "$cfg_ntfy_url"
+    fi
+  else
+    printf 'トピック名を取り込みました（値は表示しません）。\n'
+  fi
+
+  if [ "$ask_test" = 1 ] && [ -t 0 ]; then
+    printf '\nテスト通知を 1 通送りますか？ [y/N]: ' >&2
+    IFS= read -r answer || answer=
+    case $answer in
+      y | Y | yes | YES) cmd_send --title pushme -- 'pushme init からのテスト通知です' ;;
+    esac
+  fi
+}
+
+doctor_report() {
+  printf '[%s] %s\n' "$1" "$2"
+  if [ "$1" = NG ]; then doctor_ng=$((doctor_ng + 1)); fi
+}
+
+cmd_doctor() {
+  local path item
+  case ${1:-} in
+    '') ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *) die "$EX_USAGE" "doctor に不明な引数があります: $1" ;;
+  esac
+  doctor_ng=0
+  load_config
+
+  if path=$(command -v "$cfg_curl"); then
+    doctor_report OK "curl: $path"
+  else
+    doctor_report NG "curl: 見つかりません（必須）"
+  fi
+  if path=$(command -v jq); then
+    doctor_report OK "jq: $path（Claude Code の hook を使うなら必要）"
+  else
+    doctor_report -- "jq: 見つかりません（任意。Claude Code の hook を使うなら必要）"
+  fi
+
+  case $cfg_file_state in
+    ok) doctor_report OK "設定ファイル: $cfg_file" ;;
+    unreadable) doctor_report NG "設定ファイル: 読めません: $cfg_file" ;;
+    missing) doctor_report -- "設定ファイル: ありません: $cfg_file（pushme init で作成できます）" ;;
+  esac
+  for item in ${cfg_perm_problems[@]+"${cfg_perm_problems[@]}"}; do
+    doctor_report NG "$item"
+  done
+  for item in ${cfg_unknown[@]+"${cfg_unknown[@]}"}; do
+    doctor_report '!!' "設定ファイル ${item%%:*} 行目: 未知のキー ${item#*:} は無視されます"
+  done
+  for item in ${cfg_malformed[@]+"${cfg_malformed[@]}"}; do
+    doctor_report '!!' "設定ファイル $item 行目: KEY=VALUE の形式ではないため無視されます"
+  done
+
+  if config_check_common; then
+    "backend_${cfg_backend}_doctor"
+  else
+    doctor_report NG "$problem"
+  fi
+
+  if [ "$doctor_ng" -gt 0 ]; then
+    printf '問題が %d 件あります\n' "$doctor_ng"
+    exit "$EX_FAIL"
+  fi
+  printf '問題は見つかりませんでした\n'
+}
+
+main() {
+  cfg_reset
+  case ${1:-} in
+    send)
+      shift
+      cmd_send "$@"
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    doctor)
+      shift
+      cmd_doctor "$@"
+      ;;
+    help | -h | --help) usage ;;
+    version | --version) printf 'pushme %s\n' "$PUSHME_VERSION" ;;
+    *) cmd_send "$@" ;;
+  esac
+}
+
+main "$@"
