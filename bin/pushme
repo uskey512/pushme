@@ -568,7 +568,9 @@ config_check_dnd() {
       problem="PUSHME_DND の始まりと終わりが同じです: ${range}"
       return 1
     fi
-    [ -z "$dnd_range" ] && [ -n "${1:-}" ] || continue
+    if [ -n "$dnd_range" ] || [ -z "${1:-}" ]; then
+      continue
+    fi
     if [ "$start" -lt "$end" ]; then
       [ "$1" -ge "$start" ] && [ "$1" -lt "$end" ] && dnd_range=$range
     else
