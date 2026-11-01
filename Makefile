@@ -20,7 +20,7 @@ install:
 test:
 	bats test
 
-# bats' run assigns $$output, $$stderr and friends behind shellcheck's back;
+# bats' run assigns $output, $stderr and friends behind shellcheck's back;
 # releases before 0.10 (Ubuntu's apt package) report them as SC2154.
 lint:
 	shellcheck $(SHELL_SOURCES)
