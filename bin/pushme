@@ -5,7 +5,10 @@
 
 set -u
 
-# Byte semantics for ${#var}, substring slicing and [A-Z] ranges.
+# Byte semantics for ${#var}, substring slicing and [A-Z] ranges. The caller's
+# value is kept so that `pushme run` can hand it back to the command.
+caller_lc_all=${LC_ALL-}
+caller_lc_all_set=${LC_ALL+1}
 export LC_ALL=C
 
 PUSHME_VERSION=0.1.0
@@ -846,7 +849,14 @@ run_command() {
       fi
       ;;
   esac
-  (exec "$@")
+  (
+    if [ -n "$caller_lc_all_set" ]; then
+      export LC_ALL="$caller_lc_all"
+    else
+      unset LC_ALL
+    fi
+    exec "$@"
+  )
 }
 
 # Fills msg_* for a finished command. Arguments: exit code, seconds taken,

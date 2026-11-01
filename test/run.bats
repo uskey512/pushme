@@ -138,6 +138,16 @@ load helpers/common.sh
   [ "$stderr" = "err" ]
 }
 
+@test "run: the command gets the caller's LC_ALL, not pushme's own" {
+  use_env_topic
+  run env -u LC_ALL "$PUSHME_TEST_BASH" "$PUSHME_BIN" run -- sh -c 'echo "LC_ALL=${LC_ALL-unset}"' </dev/null
+  [ "$status" -eq 0 ]
+  [[ $output == *"LC_ALL=unset"* ]]
+  LC_ALL=en_US.UTF-8 run pushme run -- sh -c 'echo "LC_ALL=${LC_ALL-unset}"' </dev/null
+  [ "$status" -eq 0 ]
+  [[ $output == *"LC_ALL=en_US.UTF-8"* ]]
+}
+
 @test "run: stdin is passed to the command" {
   use_env_topic
   run pushme run -q -- cat <<<"piped input"
