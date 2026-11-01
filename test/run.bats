@@ -55,11 +55,12 @@ load helpers/common.sh
 @test "run: a program on PATH runs even when pushme has a function of that name" {
   use_env_topic
   mkdir "$BATS_TEST_TMPDIR/bin"
-  printf '#!/bin/sh\necho external usage\n' >"$BATS_TEST_TMPDIR/bin/usage"
-  chmod +x "$BATS_TEST_TMPDIR/bin/usage"
-  PATH=$BATS_TEST_TMPDIR/bin:$PATH run pushme run -q -- usage </dev/null
+  # A link to an existing program: macOS takes a moment to vet a freshly
+  # written executable the first time it runs.
+  ln -s "$(type -P echo)" "$BATS_TEST_TMPDIR/bin/usage"
+  PATH=$BATS_TEST_TMPDIR/bin:$PATH run pushme run -q -- usage external program </dev/null
   [ "$status" -eq 0 ]
-  [ "$output" = "external usage" ]
+  [ "$output" = "external program" ]
 }
 
 @test "run: a command killed by a signal is a failure with 128+N" {

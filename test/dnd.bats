@@ -125,25 +125,21 @@ check_at() {
   [ "$(cat "$(sent form-priority)")" = -2 ]
 }
 
-@test "dnd: PUSHME_DND_TZ is handed to date as TZ" {
+@test "dnd: PUSHME_DND_TZ decides which clock is read" {
   use_env_topic
-  local bin=$BATS_TEST_TMPDIR/bin
-  mkdir "$bin"
-  # A date that reports 23:30 for +%H%M and remembers the TZ it was given.
-  cat >"$bin/date" <<SCRIPT
-#!/bin/sh
-if [ "\$1" = +%H%M ]; then
-  printf '%s\n' "\${TZ-unset}" >"$BATS_TEST_TMPDIR/tz"
-  echo 2330
-else
-  exec /bin/date "\$@"
-fi
-SCRIPT
-  chmod +x "$bin/date"
-  PATH=$bin:$PATH PUSHME_DND=23:00-07:00 PUSHME_DND_TZ=Asia/Tokyo run pushme -q hi </dev/null
+  local hour range
+  # From an hour before to two hours after the current hour in Tokyo, so the
+  # result does not depend on when the test runs. New York, 13 or 14 hours
+  # behind, is well outside that range.
+  hour=$(TZ=Asia/Tokyo date +%H)
+  hour=$((10#$hour))
+  range="$(((hour + 23) % 24)):00-$(((hour + 2) % 24)):00"
+  PUSHME_DND=$range PUSHME_DND_TZ=Asia/Tokyo run pushme -q hi </dev/null
   [ "$status" -eq 0 ]
   [ "$(curl_calls)" -eq 0 ]
-  [ "$(cat "$BATS_TEST_TMPDIR/tz")" = Asia/Tokyo ]
+  PUSHME_DND=$range PUSHME_DND_TZ=America/New_York run pushme -q hi </dev/null
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
 }
 
 # --- run and hooks ---------------------------------------------------------------------------
