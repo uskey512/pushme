@@ -1,20 +1,20 @@
 # pushme
 
-シェルや cron から、自分の Android 端末にプッシュ通知を送るコマンドです。
+シェルや cron から、自分のスマートフォンやブラウザにプッシュ通知を送るコマンドです。
 
 ```sh
 pushme ビルドが終わりました
 pushme run -- make test      # 終わったら成否・所要時間を通知
 ```
 
-通知の配信には [ntfy](https://ntfy.sh/) の公開サーバー ntfy.sh（無料枠）を使います。アカウントは要りません。推測されにくい「トピック名」がパスワードの代わりになります。
+通知の配信には [ntfy](https://ntfy.sh/) の公開サーバー ntfy.sh（無料枠）を使います。アカウントは要りません。推測されにくい「トピック名」がパスワードの代わりになります。[Pushover](#pushover-で受け取る) で受け取ることもできます。
 
 ## 必要なもの
 
 - bash 3.2 以降（macOS 標準の `/bin/bash` で動きます）
 - curl
 - jq（Claude Code・Codex から通知する場合だけ）
-- Android 端末と ntfy アプリ（Google Play または F-Droid）
+- 受け取る側の ntfy アプリ（Android は Google Play または F-Droid、iOS は App Store）か、ブラウザ（[ntfy.sh/app](https://ntfy.sh/app)）
 
 ## インストール
 
@@ -37,18 +37,21 @@ pushme init
 
 トピック名をコマンドライン引数で渡す方法はありません（シェルの履歴に残るため）。設定ファイルが既にあるときは何もしません。作り直すには `pushme init --force` を使います。
 
-最後にテスト通知を送るか尋ねます（`--no-test` で尋ねません）。
+最後にテスト通知を送るか尋ねます（`--no-test` を付けたときと、トピック名を標準入力から渡したときは尋ねません）。
 
 ### `pushme doctor`
 
 依存コマンド、設定ファイル（有無・パーミッション・未知のキー）、トピック名の形式、ntfy サーバーへの疎通を確認します。疎通確認は `GET /v1/health` で行うので、通知は送りません。問題があれば終了コード 1 で終わります。
 
-## Android 側の準備
+## 受け取る側の準備
 
-1. ntfy アプリを入れる
-2. アプリの「+」から購読を追加し、「トピック名」に自分のトピック名を貼り付ける
+1. ntfy アプリ（Android / iOS）を入れる。ブラウザで受け取る場合は [ntfy.sh/app](https://ntfy.sh/app) を開く
+2. 購読を追加し、「トピック名」に自分のトピック名を貼り付ける
 3. 「別のサーバーを使う」はオフのまま（ntfy.sh のまま）「購読」を押す
 4. `pushme テスト` を実行して届くことを確かめる
+
+- ブラウザでは、ntfy のタブを開いているあいだ通知が届きます。タブを閉じても受け取りたいときは、Web アプリの設定でバックグラウンド通知をオンにします（ブラウザによっては、ブラウザ自体は起動しておく必要があります）
+- `PUSHME_NTFY_URL` で自前の ntfy サーバーを使い iOS で受け取る場合は、サーバーに `upstream-base-url: "https://ntfy.sh"` の設定が必要です。無いと届くまで数時間かかることがあります
 
 ## 使い方
 
@@ -81,7 +84,7 @@ pushme --dry-run -t タイトル 本文
 | `-a, --attach FILE` | ファイルを添付する |
 | `--filename NAME` | 添付ファイルの表示名（既定はファイル名） |
 | `--attach-url URL` | 外部の URL を添付する |
-| `--markdown` | 本文を Markdown として表示する |
+| `--markdown` | 本文を Markdown として表示する（ntfy の iOS アプリは非対応） |
 | `--no-host` | ホスト名タグを付けない |
 | `-q, --quiet` | 成功時に何も表示しない |
 | `--ignore-dnd` | おやすみ時間（`PUSHME_DND`）でも送る |
@@ -151,7 +154,7 @@ PUSHME_DND_MODE=quiet
 - その場かぎりで無視したいときは、`send` や `run` に `--ignore-dnd` を付けます
 - 時刻はマシンのローカル時刻で判定します。別のタイムゾーンで判定したいときは `PUSHME_DND_TZ`（例 `Asia/Tokyo`）を指定します
 - 送らなかったときも終了コードは 0 です（`run` はコマンドの終了コード）。理由は標準エラー出力に出します（`-q` なら出しません）。今がおやすみ時間かどうかは `pushme doctor` で、何が起きるかは `--dry-run` で確かめられます
-- スマートフォン側のおやすみモード（Android の「サイレント モード」など）とは別の仕組みです。pushme の側で送らないので、ntfy.sh の 1 日 250 通の枠も使いません
+- スマートフォン側のおやすみモード（Android の「サイレント モード」、iOS の「集中モード」など）とは別の仕組みです。pushme の側で送らないので、ntfy.sh の 1 日 250 通の枠も使いません
 
 GitHub Actions のランナーの時刻は UTC なので、`PUSHME_DND_TZ` が必要です。ステップの `env:` に書きます。
 
@@ -222,7 +225,9 @@ Claude Code のプラグインとして入れると、次のときに通知が�
 claude plugin install pushme --marketplace uskey512/pushme
 ```
 
-Claude Code のセッションの中からは次のように入れます。
+`--marketplace` が使えない古い Claude Code では、`claude plugin marketplace add uskey512/pushme` のあと `claude plugin install pushme@pushme` とします。
+
+Claude Code のセッションの中からは次のように入れます（`/plugin` の画面が開くので、そこでインストールを確定します）。
 
 ```
 /plugin install pushme --marketplace uskey512/pushme
@@ -361,7 +366,7 @@ jobs:
 
 ## Pushover で受け取る
 
-ntfy の代わりに [Pushover](https://pushover.net/)（iOS / Android 用の有料アプリ）でも受け取れます。
+ntfy の代わりに [Pushover](https://pushover.net/)（iOS・Android・デスクトップのブラウザ向けの有料アプリ。30 日間は無料で試せます）でも受け取れます。
 
 1. Pushover のアカウントを作り、ダッシュボードに表示される User Key を控える
 2. https://pushover.net/apps/build でアプリケーションを作り、API Token を控える
@@ -380,7 +385,7 @@ ntfy との違いは次のとおりです。
 - 優先度は 1→-2、2→-1、3→0、4 と 5→1 に置き換えます。緊急（2）は確認するまで鳴り続けるため、自動では使いません
 - Pushover にはタグがありません。`white_check_mark` ✅、`x` ❌、`question` ❓、`warning` ⚠️ などの主な絵文字のタグは、タイトルの先頭に絵文字として付けます。それ以外のタグは送らず、タイトルの末尾に ` @ホスト名` を付けます
 - タイトルは 250 バイト、本文は 1,024 バイトに切り詰めます
-- `--markdown` と `--filename` は使いません。`--attach` は 5 MiB まで（それより大きいと本文だけ送り、警告を出します）。`--attach-url` は本文の末尾に URL を足します
+- `--markdown` と `--filename` は使いません。`--attach` は画像にだけ対応しています（Pushover の仕様）。5 MiB より大きいと本文だけ送り、警告を出します。`--attach-url` は本文の末尾に URL を足します
 - トークンとユーザーキーは、トピック名と同じく伏せ字にし、`ps` にも出しません
 
 GitHub Actions では `backend: pushover` と、`pushover-token: ${{ secrets.PUSHOVER_TOKEN }}`・`pushover-user: ${{ secrets.PUSHOVER_USER }}` を指定します。

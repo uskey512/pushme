@@ -1505,9 +1505,9 @@ cmd_init() {
 
   $topic
 
-Android 側の準備:
-  1. ntfy アプリを入れる（Google Play または F-Droid）
-  2. アプリの「+」から購読を追加し、「トピック名」に上の文字列を貼り付ける
+受け取る側の準備:
+  1. ntfy アプリ（Android / iOS）を入れるか、ブラウザで ntfy の Web アプリを開く
+  2. 購読を追加し、「トピック名」に上の文字列を貼り付ける
 EOF
     if [ "$cfg_ntfy_url" = "$NTFY_DEFAULT_URL" ]; then
       printf '  3. 「別のサーバーを使う」はオフのまま「購読」を押す\n'
