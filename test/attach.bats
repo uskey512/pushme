@@ -132,6 +132,7 @@ make_file() {
   [[ $output == *"PUT https://ntfy.sh/pus…(26 chars)"* ]]
   [[ $output == *"Filename: a.txt"* ]]
   [[ $output == *"X-Message: hi"* ]]
+  printf '%s\n' "$output"
   [[ $output == *"添付ファイル: $file（3 バイト）"* ]]
 }
 

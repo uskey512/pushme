@@ -165,7 +165,7 @@ load helpers/common.sh
   use_env_topic
   export TMPDIR=$BATS_TEST_TMPDIR/tmp
   mkdir "$TMPDIR"
-  run pushme run -q --tail 2 -- sh -c 'echo line1; echo line2; echo line3; echo line4 >&2' </dev/null
+  run pushme run -q --tail 2 -- sh -c 'for i in 1 2 3; do echo "line$i"; done; echo line4 >&2' </dev/null
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf 'line1\nline2\nline3\nline4')" ]
   local body
