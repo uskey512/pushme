@@ -3,6 +3,7 @@ BINDIR := $(PREFIX)/bin
 
 SHELL_SOURCES := bin/pushme $(wildcard test/helpers/*.sh)
 BATS_SOURCES := $(wildcard test/*.bats)
+JSON_SOURCES := $(wildcard .claude-plugin/*.json hooks/*.json examples/*.json test/fixtures/claude/*.json)
 SHFMT_FLAGS := -i 2 -ci
 
 .PHONY: install test lint
@@ -26,3 +27,4 @@ lint:
 	shellcheck $(SHELL_SOURCES)
 	shellcheck --severity=warning --exclude=SC2154 $(BATS_SOURCES)
 	shfmt $(SHFMT_FLAGS) -d $(SHELL_SOURCES)
+	jq empty $(JSON_SOURCES)

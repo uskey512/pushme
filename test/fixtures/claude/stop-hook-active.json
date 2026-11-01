@@ -1,0 +1,9 @@
+{
+  "session_id": "abc12345-6789-4def-8123-456789abcdef",
+  "transcript_path": "/home/someone/.claude/projects/example/abc12345.jsonl",
+  "cwd": "/home/someone/src/my-project",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": true,
+  "last_assistant_message": "Continuing because a stop hook asked me to."
+}

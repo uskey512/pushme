@@ -1,0 +1,20 @@
+{
+  "description": "Send push notifications on Claude Code lifecycle events",
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "async": true, "timeout": 10 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "async": true, "timeout": 30 } ] }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog|elicitation_url_dialog",
+        "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "async": true, "timeout": 30 } ]
+      }
+    ],
+    "StopFailure": [
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "async": true, "timeout": 30 } ] }
+    ]
+  }
+}

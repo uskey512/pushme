@@ -1,0 +1,8 @@
+{
+  "name": "pushme",
+  "description": "Push notifications from Claude Code hooks (task finished, waiting for approval, API error)",
+  "author": { "name": "uskey512" },
+  "repository": "https://github.com/uskey512/pushme",
+  "license": "MIT",
+  "keywords": ["notification", "hooks"]
+}
