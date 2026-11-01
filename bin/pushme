@@ -16,6 +16,11 @@ NTFY_DEFAULT_URL=https://ntfy.sh
 # ntfy delivers a body over 4,096 bytes as a file attachment instead of
 # notification text.
 NTFY_BODY_MAX=4000
+# ntfy rejects a title over 1 KB, or tags over 512 bytes in total, with HTTP 400.
+NTFY_TITLE_MAX=1000
+NTFY_TAGS_MAX=512
+# The attachment size limit of the ntfy.sh free tier.
+NTFY_ATTACH_MAX_DEFAULT=2097152
 TOPIC_RULE='英数字・「-」・「_」の 1〜64 文字'
 
 usage() {
@@ -24,30 +29,40 @@ pushme — スマートフォンにプッシュ通知を送る（ntfy）
 
 使い方:
   pushme [send] [オプション] [メッセージ...]
+  pushme run [オプション] [--on-fail-only] [--tail N] -- コマンド [引数...]
   pushme init [--force] [--no-test]
   pushme doctor
   pushme help | version
 
-send のオプション:
+send と run のオプション:
   -t, --title TEXT       タイトル
   -p, --priority VALUE   優先度。1〜5 または min / low / default / high / urgent
   -T, --tags a,b         タグ（カンマ区切り。繰り返し指定できる）。末尾にホスト名タグが付く
   -c, --click URL        通知をタップしたときに開く URL
+  -a, --attach FILE      ファイルを添付する
+      --filename NAME    添付ファイルの表示名（既定はファイル名）
+      --attach-url URL   外部の URL を添付する
       --markdown         本文を Markdown として表示する
       --no-host          ホスト名タグを付けない
-  -q, --quiet            成功時に何も表示しない
+  -q, --quiet            成功時に何も表示しない（cron ではメールが届かないよう付ける）
       --dry-run          送信せず、送る内容を表示する（トピック名とトークンは伏せ字）
-      --                 これ以降の引数をすべてメッセージとして扱う
 
-メッセージ:
+send:
   引数を空白でつないで本文にする。引数がなく標準入力が端末でなければ標準入力を読む。
-  「-」だけを指定したときも標準入力を読む。4,000 バイトを超える本文は切り詰める。
+  「-」だけを指定したときも標準入力を読む。「--」以降の引数はすべてメッセージになる。
+  4,000 バイトを超える本文は切り詰める。
+
+run:
+  コマンドを実行し、終わったら成否・終了コード・所要時間を通知する。
+  終了コードはコマンドの終了コードそのまま（通知に失敗しても変わらない）。
+  --on-fail-only   終了コードが 0 のときは通知しない
+  --tail N         出力の末尾 N 行を本文に含める（標準エラーは標準出力に合流する）
 
 init のオプション:
   --force     既存の設定ファイルを作り直す
   --no-test   最後にテスト通知を送るか尋ねない
 
-終了コード: 0 = 成功、1 = 送信の失敗、2 = 使い方の誤り・設定の不足
+終了コード: 0 = 成功、1 = 送信の失敗、2 = 使い方の誤り・設定の不足（run を除く）
 設定ファイル: ~/.config/pushme/config（XDG_CONFIG_HOME や PUSHME_CONFIG で変更できる）
 EOF
 }
@@ -192,6 +207,55 @@ truncate_utf8() {
   REPLY=$s$ellipsis
 }
 
+# Keeps the last $2 bytes of $1 behind a leading "…", starting on a UTF-8
+# character boundary.
+keep_tail_utf8() {
+  local s=$1 max=$2 ellipsis=$'\xe2\x80\xa6' k=0
+  if [ "${#s}" -le "$max" ]; then
+    REPLY=$s
+    return
+  fi
+  s=${s:$((${#s} - max + ${#ellipsis}))}
+  while [ "$k" -lt 3 ]; do
+    case ${s:0:1} in
+      [$'\x80'-$'\xbf']) s=${s:1} ;;
+      *) break ;;
+    esac
+    k=$((k + 1))
+  done
+  REPLY=$ellipsis$s
+}
+
+format_duration() {
+  local h m s=$1
+  h=$((s / 3600))
+  m=$((s % 3600 / 60))
+  s=$((s % 60))
+  if [ "$h" -gt 0 ]; then
+    REPLY=${h}h${m}m${s}s
+  elif [ "$m" -gt 0 ]; then
+    REPLY=${m}m${s}s
+  else
+    REPLY=${s}s
+  fi
+}
+
+# Quotes words that contain whitespace or quotes, so the command line in a
+# notification reads unambiguously.
+format_command_line() {
+  local arg escaped out='' q="'" q_escaped="'\\''"
+  for arg in "$@"; do
+    case $arg in
+      '' | *[[:space:]]* | *"$q"*)
+        escaped=${arg//"$q"/"$q_escaped"}
+        arg="'$escaped'"
+        ;;
+    esac
+    out=${out:+$out }$arg
+  done
+  REPLY=$out
+}
+
 # Some HTTP stacks mangle raw UTF-8 in headers, and ntfy decodes RFC 2047
 # encoded-words in every header (https://docs.ntfy.sh/publish/#list-of-all-parameters).
 # Values containing "=?" are encoded too, or the server would decode them.
@@ -215,6 +279,12 @@ file_mode() {
   stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1" 2>/dev/null
 }
 
+file_size() {
+  local size
+  size=$(wc -c <"$1" 2>/dev/null) || return 1
+  REPLY=$((size))
+}
+
 # --- configuration ---------------------------------------------------------
 
 config_path() {
@@ -229,6 +299,7 @@ cfg_reset() {
   cfg_hostname=
   cfg_timeout=
   cfg_curl=
+  cfg_ntfy_attach_max=
   cfg_file=
   cfg_file_state=missing
   cfg_unknown=()
@@ -260,7 +331,7 @@ config_read_file() {
       PUSHME_NTFY_TOKEN) cfg_ntfy_token=$value ;;
       PUSHME_HOSTNAME) cfg_hostname=$value ;;
       PUSHME_TIMEOUT) cfg_timeout=$value ;;
-      PUSHME_CURL) cfg_curl=$value ;;
+      PUSHME_NTFY_ATTACH_MAX) cfg_ntfy_attach_max=$value ;;
       *) cfg_unknown+=("$lineno:$key") ;;
     esac
   done <"$1"
@@ -273,6 +344,8 @@ config_read_env() {
   if [ -n "${PUSHME_NTFY_TOKEN:-}" ]; then cfg_ntfy_token=$PUSHME_NTFY_TOKEN; fi
   if [ -n "${PUSHME_HOSTNAME:-}" ]; then cfg_hostname=$PUSHME_HOSTNAME; fi
   if [ -n "${PUSHME_TIMEOUT:-}" ]; then cfg_timeout=$PUSHME_TIMEOUT; fi
+  if [ -n "${PUSHME_NTFY_ATTACH_MAX:-}" ]; then cfg_ntfy_attach_max=$PUSHME_NTFY_ATTACH_MAX; fi
+  # Environment only: the config file must not choose a program to execute.
   if [ -n "${PUSHME_CURL:-}" ]; then cfg_curl=$PUSHME_CURL; fi
 }
 
@@ -315,6 +388,7 @@ load_config() {
   fi
   config_read_env
   : "${cfg_backend:=ntfy}" "${cfg_ntfy_url:=$NTFY_DEFAULT_URL}" "${cfg_timeout:=10}" "${cfg_curl:=curl}"
+  : "${cfg_ntfy_attach_max:=$NTFY_ATTACH_MAX_DEFAULT}"
   while :; do
     case $cfg_ntfy_url in
       */) cfg_ntfy_url=${cfg_ntfy_url%/} ;;
@@ -359,6 +433,11 @@ curl_conf_add() {
   s=${s//"$tab"/"${bs}t"}
   s=${s//"$vt"/"${bs}v"}
   curl_conf="$curl_conf$1 = \"$s\"$nl"
+}
+
+curl_conf_header() {
+  header_value "$2"
+  curl_conf_add header "$1: $REPLY"
 }
 
 # Sends the request in $curl_conf. Returns 0 when the server accepted it.
@@ -433,48 +512,103 @@ backend_ntfy_validate() {
       return 1
       ;;
   esac
+  case $cfg_ntfy_attach_max in
+    '' | *[!0-9]*)
+      problem="PUSHME_NTFY_ATTACH_MAX は 0 以上の整数（バイト）にしてください"
+      return 1
+      ;;
+  esac
+}
+
+# Drops the caller's tags from the end until the total fits ntfy's limit; the
+# host tag is always kept. Sets REPLY.
+ntfy_fit_tags() {
+  local rest=${1:+$1,} host=$2 tag kept='' total=${#2} dropped=0
+  while [ -n "$rest" ]; do
+    tag=${rest%%,*}
+    rest=${rest#*,}
+    if [ "$dropped" -eq 0 ] && [ $((total + ${#tag})) -le "$NTFY_TAGS_MAX" ]; then
+      kept=${kept:+$kept,}$tag
+      total=$((total + ${#tag}))
+    else
+      dropped=$((dropped + 1))
+    fi
+  done
+  if [ "$dropped" -gt 0 ]; then
+    warn "タグが ntfy の上限（合計 $NTFY_TAGS_MAX バイト）を超えるため、末尾の $dropped 個を送りません"
+  fi
+  [ -z "$host" ] || kept=${kept:+$kept,}$host
+  REPLY=$kept
 }
 
 backend_ntfy_send() {
-  local url tags body
+  local url title tags body attach=$msg_attach filename=$msg_filename size=0 method=POST note
   url=$cfg_ntfy_url/$cfg_ntfy_topic
-  tags=$msg_tags
-  [ -z "$msg_host" ] || tags=${tags:+$tags,}$msg_host
-  truncate_utf8 "$msg_body" "$NTFY_BODY_MAX"
+  truncate_utf8 "$msg_title" "$NTFY_TITLE_MAX"
+  title=$REPLY
+  ntfy_fit_tags "$msg_tags" "$msg_host"
+  tags=$REPLY
+  body=$msg_body
+
+  if [ -n "$attach" ]; then
+    if ! file_size "$attach"; then
+      err "添付ファイルを読めません: $attach"
+      return 1
+    fi
+    size=$REPLY
+    if [ "$size" -gt "$cfg_ntfy_attach_max" ]; then
+      note="添付ファイル $filename（$size バイト）は上限の $cfg_ntfy_attach_max バイトを超えるため送っていません"
+      warn "$note"
+      body=${body:+$body$'\n\n'}$note
+      attach=''
+    fi
+  fi
+  if [ -n "$attach" ]; then
+    method=PUT
+  elif [ -z "$msg_attach_url" ]; then
+    filename=''
+  fi
+  truncate_utf8 "$body" "$NTFY_BODY_MAX"
   body=$REPLY
 
   if [ "$opt_dry_run" = 1 ]; then
     printf '%s\n' 'pushme: dry-run（送信していません）'
-    printf 'POST %s\n' "$(redact "$url")"
-    if [ -n "$msg_title" ]; then printf 'X-Title: %s\n' "$msg_title"; fi
+    printf '%s %s\n' "$method" "$(redact "$url")"
+    if [ -n "$title" ]; then printf 'X-Title: %s\n' "$title"; fi
     if [ -n "$msg_priority" ]; then printf 'X-Priority: %s\n' "$msg_priority"; fi
     if [ -n "$tags" ]; then printf 'X-Tags: %s\n' "$tags"; fi
     if [ -n "$msg_click" ]; then printf 'X-Click: %s\n' "$msg_click"; fi
     if [ "$msg_markdown" = 1 ]; then printf 'X-Markdown: yes\n'; fi
+    if [ -n "$msg_attach_url" ]; then printf 'X-Attach: %s\n' "$msg_attach_url"; fi
+    if [ -n "$filename" ]; then printf 'Filename: %s\n' "$filename"; fi
     if [ -n "$cfg_ntfy_token" ]; then printf 'Authorization: Bearer %s\n' "$(mask "$cfg_ntfy_token")"; fi
-    printf -- '--- 本文（%d バイト）---\n%s\n' "${#body}" "$body"
+    if [ -n "$attach" ]; then
+      if [ -n "$body" ]; then printf 'X-Message: %s\n' "$body"; fi
+      printf -- '--- 添付ファイル: %s（%d バイト）---\n' "$attach" "$size"
+    else
+      printf -- '--- 本文（%d バイト）---\n%s\n' "${#body}" "$body"
+    fi
     return 0
   fi
 
   curl_conf=
   curl_conf_add url "$url"
-  if [ -n "$msg_title" ]; then
-    header_value "$msg_title"
-    curl_conf_add header "X-Title: $REPLY"
-  fi
+  if [ -n "$title" ]; then curl_conf_header X-Title "$title"; fi
   if [ -n "$msg_priority" ]; then curl_conf_add header "X-Priority: $msg_priority"; fi
-  if [ -n "$tags" ]; then
-    header_value "$tags"
-    curl_conf_add header "X-Tags: $REPLY"
-  fi
-  if [ -n "$msg_click" ]; then
-    header_value "$msg_click"
-    curl_conf_add header "X-Click: $REPLY"
-  fi
+  if [ -n "$tags" ]; then curl_conf_header X-Tags "$tags"; fi
+  if [ -n "$msg_click" ]; then curl_conf_header X-Click "$msg_click"; fi
   if [ "$msg_markdown" = 1 ]; then curl_conf_add header "X-Markdown: yes"; fi
+  if [ -n "$msg_attach_url" ]; then curl_conf_header X-Attach "$msg_attach_url"; fi
+  if [ -n "$filename" ]; then curl_conf_header Filename "$filename"; fi
   if [ -n "$cfg_ntfy_token" ]; then curl_conf_add header "Authorization: Bearer $cfg_ntfy_token"; fi
-  # data-raw: a body starting with "@" must not be read as a file name.
-  curl_conf_add data-raw "$body"
+  if [ -n "$attach" ]; then
+    # With a PUT upload the request body is the file, so the text moves to a header.
+    if [ -n "$body" ]; then curl_conf_header X-Message "$body"; fi
+    curl_conf_add upload-file "$attach"
+  else
+    # data-raw: a body starting with "@" must not be read as a file name.
+    curl_conf_add data-raw "$body"
+  fi
   curl_send_conf
 }
 
@@ -500,6 +634,9 @@ backend_ntfy_doctor() {
       *) doctor_report OK "アクセストークン: 設定済み（${#cfg_ntfy_token} 文字。値は表示しません）" ;;
     esac
   fi
+  case $cfg_ntfy_attach_max in
+    '' | *[!0-9]*) doctor_report NG "添付の上限: PUSHME_NTFY_ATTACH_MAX は 0 以上の整数（バイト）にしてください" ;;
+  esac
   [ "$url_ok" = 1 ] || return 0
   if ! command -v "$cfg_curl" >/dev/null 2>&1; then
     doctor_report NG "疎通: curl がないため確認できません"
@@ -519,33 +656,133 @@ backend_ntfy_doctor() {
   esac
 }
 
+# --- options shared by send and run ---------------------------------------
+
+reset_message_options() {
+  opt_title=''
+  opt_priority=''
+  opt_priority_set=0
+  opt_tags=''
+  opt_click=''
+  opt_attach=''
+  opt_attach_set=0
+  opt_filename=''
+  opt_attach_url=''
+  opt_markdown=0
+  opt_no_host=0
+  opt_quiet=0
+  opt_dry_run=0
+}
+
+value_option() {
+  case $1 in
+    -t | --title | -p | --priority | -T | --tags | -c | --click | -a | --attach | \
+      --filename | --attach-url | --tail)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# Consumes one option shared by send and run. OPT_SHIFT is the number of
+# arguments used, 0 when $1 is not one of them.
+parse_message_option() {
+  OPT_SHIFT=1
+  if value_option "$1"; then
+    [ $# -ge 2 ] || die "$EX_USAGE" "$1 には値が必要です"
+    OPT_SHIFT=2
+  fi
+  case $1 in
+    -t | --title) opt_title=$2 ;;
+    -p | --priority) opt_priority=$2 opt_priority_set=1 ;;
+    -T | --tags) opt_tags=${opt_tags:+$opt_tags,}$2 ;;
+    -c | --click) opt_click=$2 ;;
+    -a | --attach) opt_attach=$2 opt_attach_set=1 ;;
+    --filename) opt_filename=$2 ;;
+    --attach-url) opt_attach_url=$2 ;;
+    --markdown) opt_markdown=1 ;;
+    --no-host) opt_no_host=1 ;;
+    -q | --quiet) opt_quiet=1 ;;
+    --dry-run) opt_dry_run=1 ;;
+    *) OPT_SHIFT=0 ;;
+  esac
+}
+
+# Checks the shared options and copies them into msg_*.
+prepare_message() {
+  msg_priority=''
+  if [ "$opt_priority_set" = 1 ]; then
+    normalize_priority "$opt_priority" ||
+      die "$EX_USAGE" "優先度の値が不正です: $opt_priority（1〜5 または min / low / default / high / urgent）"
+    msg_priority=$REPLY
+  fi
+  if [ "$opt_attach_set" = 1 ] && [ -n "$opt_attach_url" ]; then
+    die "$EX_USAGE" "--attach と --attach-url は同時に指定できません"
+  fi
+  if [ -n "$opt_filename" ] && [ "$opt_attach_set" = 0 ] && [ -z "$opt_attach_url" ]; then
+    die "$EX_USAGE" "--filename は --attach か --attach-url と一緒に指定してください"
+  fi
+  normalize_tags "$opt_tags"
+  msg_tags=$REPLY
+  msg_title=$opt_title
+  msg_click=$opt_click
+  msg_markdown=$opt_markdown
+  msg_attach=$opt_attach
+  msg_attach_url=$opt_attach_url
+  msg_filename=$opt_filename
+  if [ "$opt_attach_set" = 1 ] && [ -z "$msg_filename" ]; then
+    msg_filename=${opt_attach##*/}
+  fi
+  msg_body=''
+}
+
+# Loads the configuration and checks that a notification can be sent. On
+# failure sets $problem and returns 1.
+load_valid_config() {
+  local p
+  load_config
+  for p in ${cfg_perm_problems[@]+"${cfg_perm_problems[@]}"}; do
+    warn "$p"
+  done
+  if [ "$cfg_file_state" = unreadable ]; then
+    problem="設定ファイルを読めません: $cfg_file"
+    return 1
+  fi
+  config_check_common && "backend_${cfg_backend}_validate"
+}
+
+set_message_host() {
+  if [ "$opt_no_host" = 1 ]; then
+    msg_host=''
+  else
+    msg_host=${cfg_hostname:-$(default_hostname)}
+  fi
+}
+
+attachment_readable() {
+  [ -f "$1" ] && [ -r "$1" ]
+}
+
 # --- commands --------------------------------------------------------------
 
 cmd_send() {
-  local title='' priority='' priority_set=0 tags='' click='' markdown=0 no_host=0 body
-  local args=()
-  opt_quiet=0
-  opt_dry_run=0
+  local args body
+  reset_message_options
   while [ $# -gt 0 ]; do
     case $1 in
-      --title=* | --priority=* | --tags=* | --click=*)
-        set -- "${1%%=*}" "${1#*=}" "${@:2}"
-        continue
+      --?*=*)
+        if value_option "${1%%=*}"; then
+          set -- "${1%%=*}" "${1#*=}" "${@:2}"
+          continue
+        fi
         ;;
-      -t | --title | -p | --priority | -T | --tags | -c | --click)
-        [ $# -ge 2 ] || die "$EX_USAGE" "$1 には値が必要です"
-        case $1 in
-          -t | --title) title=$2 ;;
-          -p | --priority) priority=$2 priority_set=1 ;;
-          -T | --tags) tags=${tags:+$tags,}$2 ;;
-          -c | --click) click=$2 ;;
-        esac
-        shift
-        ;;
-      --markdown) markdown=1 ;;
-      --no-host) no_host=1 ;;
-      -q | --quiet) opt_quiet=1 ;;
-      --dry-run) opt_dry_run=1 ;;
+    esac
+    parse_message_option "$@"
+    if [ "$OPT_SHIFT" -gt 0 ]; then
+      shift "$OPT_SHIFT"
+      continue
+    fi
+    case $1 in
       -h | --help)
         usage
         exit 0
@@ -558,38 +795,12 @@ cmd_send() {
       -?*) die "$EX_USAGE" "不明なオプションです: $1（pushme help を参照）" ;;
       *) break ;;
     esac
-    shift
   done
   args=("$@")
 
-  msg_priority=
-  if [ "$priority_set" = 1 ]; then
-    normalize_priority "$priority" ||
-      die "$EX_USAGE" "優先度の値が不正です: $priority（1〜5 または min / low / default / high / urgent）"
-    msg_priority=$REPLY
-  fi
-  normalize_tags "$tags"
-  msg_tags=$REPLY
-  msg_title=$title
-  msg_click=$click
-  msg_markdown=$markdown
-
-  load_config
-  if [ "$cfg_file_state" = unreadable ]; then
-    die "$EX_USAGE" "設定ファイルを読めません: $cfg_file"
-  fi
-  local p
-  for p in ${cfg_perm_problems[@]+"${cfg_perm_problems[@]}"}; do
-    warn "$p"
-  done
-  config_check_common || die "$EX_USAGE" "$problem"
-  "backend_${cfg_backend}_validate" || die "$EX_USAGE" "$problem"
-
-  if [ "$no_host" = 1 ]; then
-    msg_host=
-  else
-    msg_host=${cfg_hostname:-$(default_hostname)}
-  fi
+  prepare_message
+  load_valid_config || die "$EX_USAGE" "$problem"
+  set_message_host
 
   if [ ${#args[@]} -eq 1 ] && [ "${args[0]}" = - ]; then
     body=$(cat)
@@ -602,14 +813,195 @@ cmd_send() {
     body=
   fi
   if is_blank "$body"; then
-    die "$EX_USAGE" "本文が空です（引数か標準入力で渡してください）"
+    if [ "$opt_attach_set" = 0 ] && [ -z "$msg_attach_url" ]; then
+      die "$EX_USAGE" "本文が空です（引数か標準入力で渡してください）"
+    fi
+    body=''
   fi
   msg_body=$body
+  if [ "$opt_attach_set" = 1 ] && ! attachment_readable "$msg_attach"; then
+    die "$EX_USAGE" "添付ファイルを読めません: $msg_attach"
+  fi
 
   "backend_${cfg_backend}_send" || exit "$EX_FAIL"
   if [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
     printf '%s\n' 'pushme: 送信しました'
   fi
+}
+
+# Runs an external program only, never one of pushme's functions or a
+# builtin such as exit.
+run_command() {
+  case $1 in
+    */*)
+      if [ ! -e "$1" ]; then
+        printf 'pushme: %s: ファイルがありません\n' "$1" >&2
+        return 127
+      fi
+      ;;
+    *)
+      if ! type -P "$1" >/dev/null; then
+        printf 'pushme: %s: コマンドが見つかりません\n' "$1" >&2
+        return 127
+      fi
+      ;;
+  esac
+  (exec "$@")
+}
+
+# Fills msg_* for a finished command. Arguments: exit code, seconds taken,
+# --tail line count, captured output, then the command itself.
+run_build_message() {
+  local rc=$1 elapsed=$2 lines=$3 output=$4 nl=$'\n' name tag exit_text signame
+  local command_line section budget
+  shift 4
+  name=${1##*/}
+  if [ "$rc" -eq 0 ]; then
+    tag=white_check_mark
+    : "${msg_title:=$name 成功}"
+  else
+    tag=x
+    : "${msg_title:=$name 失敗 (exit $rc)}"
+  fi
+  : "${msg_priority:=4}"
+  msg_tags=$tag${msg_tags:+,$msg_tags}
+
+  exit_text=$rc
+  if [ "$rc" -gt 128 ] && signame=$(kill -l $((rc - 128)) 2>/dev/null); then
+    exit_text="$rc（SIG$signame）"
+  fi
+  format_command_line "$@"
+  truncate_utf8 "$REPLY" 300
+  command_line=$REPLY
+  format_duration "$elapsed"
+  msg_body="\$ $command_line${nl}終了コード: $exit_text${nl}所要時間: $REPLY"
+  if [ -n "$output" ]; then
+    section="${nl}--- 出力の末尾 $lines 行 ---${nl}"
+    budget=$((NTFY_BODY_MAX - ${#msg_body} - ${#section}))
+    if [ "$budget" -gt 3 ]; then
+      keep_tail_utf8 "$output" "$budget"
+      msg_body=$msg_body$section$REPLY
+    fi
+  fi
+
+  # The file may be one the command was supposed to write, so a missing one
+  # only drops the attachment instead of losing the notification.
+  if [ "$opt_attach_set" = 1 ] && ! attachment_readable "$msg_attach"; then
+    warn "添付ファイルを読めないため、添付せずに送ります: $msg_attach"
+    msg_attach=''
+    msg_filename=''
+  fi
+  set_message_host
+}
+
+# Exits with the command's status. When pushme itself received the signal
+# that ended the command, it dies by that signal instead, so a calling shell
+# notices the interruption (a script loop stops on Ctrl-C).
+run_exit() {
+  local rc=$1 num=''
+  case $run_signal in
+    HUP) num=1 ;;
+    INT) num=2 ;;
+    TERM) num=15 ;;
+  esac
+  if [ -n "$num" ] && [ "$rc" -eq $((128 + num)) ]; then
+    trap - "$run_signal"
+    kill -s "$run_signal" "$$"
+  fi
+  exit "$rc"
+}
+
+cmd_run() {
+  local on_fail_only=0 tail_set=0 tail_lines='' separator=0 can_notify=1
+  local rc start elapsed tmp='' output=''
+  reset_message_options
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --?*=*)
+        if value_option "${1%%=*}"; then
+          set -- "${1%%=*}" "${1#*=}" "${@:2}"
+          continue
+        fi
+        ;;
+    esac
+    parse_message_option "$@"
+    if [ "$OPT_SHIFT" -gt 0 ]; then
+      shift "$OPT_SHIFT"
+      continue
+    fi
+    case $1 in
+      --on-fail-only) on_fail_only=1 ;;
+      --tail)
+        tail_set=1
+        tail_lines=$2
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        separator=1
+        break
+        ;;
+      -?*) die "$EX_USAGE" "不明なオプションです: $1（pushme help を参照）" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  if [ "$separator" = 0 ] || [ $# -eq 0 ]; then
+    die "$EX_USAGE" "実行するコマンドを -- の後に書いてください（pushme run [オプション] -- コマンド [引数...]）"
+  fi
+  if [ "$tail_set" = 1 ]; then
+    case $tail_lines in
+      '' | *[!0-9]*) die "$EX_USAGE" "--tail には 1 以上の整数を指定してください" ;;
+    esac
+    [ $((10#$tail_lines)) -ge 1 ] || die "$EX_USAGE" "--tail には 1 以上の整数を指定してください"
+  fi
+  prepare_message
+  # Reported before the command starts, so a long job does not run on with a
+  # notification that can never arrive.
+  if ! load_valid_config; then
+    err "通知は送れません（コマンドはそのまま実行します）: $problem"
+    can_notify=0
+  fi
+
+  # The command runs in the foreground: a background job of a non-interactive
+  # bash starts with SIGINT ignored, and bash 3.2 cannot undo that, so Ctrl-C
+  # would no longer stop it. Ctrl-C reaches the whole foreground process group,
+  # so the command gets it directly; the traps only keep pushme alive to notify.
+  run_signal=''
+  trap 'run_signal=INT' INT
+  trap 'run_signal=TERM' TERM
+  trap 'run_signal=HUP' HUP
+  if [ "$tail_set" = 1 ]; then
+    tmp=$(mktemp "${TMPDIR:-/tmp}/pushme-run.XXXXXX") ||
+      warn "一時ファイルを作れないため、--tail の出力は通知に含めません"
+  fi
+  start=$SECONDS
+  if [ -n "$tmp" ]; then
+    run_command "$@" 2>&1 | tee "$tmp"
+    rc=${PIPESTATUS[0]}
+    output=$(tail -n "$tail_lines" "$tmp")
+    rm -f "$tmp"
+  else
+    run_command "$@"
+    rc=$?
+  fi
+  elapsed=$((SECONDS - start))
+
+  if [ "$rc" -eq 0 ] && [ "$on_fail_only" = 1 ]; then
+    run_exit "$rc"
+  fi
+  if [ "$can_notify" = 1 ]; then
+    run_build_message "$rc" "$elapsed" "$tail_lines" "$output" "$@"
+    # stdout belongs to the command, so pushme's own report goes to stderr.
+    if "backend_${cfg_backend}_send" && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+      printf '%s\n' 'pushme: 通知を送りました' >&2
+    fi
+  fi
+  run_exit "$rc"
 }
 
 generate_topic() {
@@ -786,6 +1178,10 @@ main() {
       shift
       cmd_send "$@"
       ;;
+    run)
+      shift
+      cmd_run "$@"
+      ;;
     init)
       shift
       cmd_init "$@"
@@ -800,4 +1196,7 @@ main() {
   esac
 }
 
-main "$@"
+# Sourcing the file, as the tests do, defines the functions without running main.
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

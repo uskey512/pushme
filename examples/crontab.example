@@ -1,0 +1,17 @@
+# pushme を cron から使う例。`crontab -e` で必要な行だけ貼り付けて使う。
+#
+# - cron はジョブが何か出力するとメールを送る。pushme には -q を付けて、
+#   成功時の「送信しました」を出さないようにする
+# - コマンド自身の出力もメールになる。通知だけでよければ >/dev/null 2>&1 を付ける
+#   （通知の失敗は ~/.local/state/pushme/error.log に残る）
+# - cron の PATH は短いので、pushme はフルパスで書く（make install の既定の場所）
+# - 設定は ~/.config/pushme/config から読む
+
+# 毎日 3 時のバックアップ。失敗したときだけ、出力の末尾 20 行を付けて通知する
+0 3 * * * $HOME/.local/bin/pushme run -q --on-fail-only --tail 20 -- /usr/local/bin/backup.sh >/dev/null 2>&1
+
+# 毎週月曜 9 時に、ディスクの使用状況を送る
+0 9 * * 1 df -h / | $HOME/.local/bin/pushme -q -t 'ディスク使用量'
+
+# 毎晩のビルド。成功・失敗のどちらでも通知し、ログを添付する
+30 1 * * * cd $HOME/src/myapp && $HOME/.local/bin/pushme run -q -a build.log -- sh -c 'make > build.log 2>&1' >/dev/null 2>&1

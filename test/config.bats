@@ -109,3 +109,17 @@ load helpers/common.sh
   run -2 --separate-stderr pushme hi </dev/null
   [[ $stderr == *"設定ファイルを読めません"* ]]
 }
+
+@test "config: PUSHME_CURL is taken from the environment only" {
+  unset PUSHME_CURL
+  local marker=$BATS_TEST_TMPDIR/config-curl-ran
+  printf '#!/bin/sh\ntouch "%s"\n' "$marker" >"$BATS_TEST_TMPDIR/config-curl"
+  chmod +x "$BATS_TEST_TMPDIR/config-curl"
+  # doctor only GETs /v1/health, and this URL refuses connections.
+  write_config "PUSHME_NTFY_TOPIC=$TEST_TOPIC" "PUSHME_NTFY_URL=http://127.0.0.1:9" \
+    "PUSHME_CURL=$BATS_TEST_TMPDIR/config-curl"
+  run pushme doctor </dev/null
+  [ ! -e "$marker" ]
+  [[ $output == *"未知のキー PUSHME_CURL"* ]]
+  [[ $output != *config-curl* ]]
+}

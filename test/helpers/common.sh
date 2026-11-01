@@ -69,6 +69,19 @@ sent_header() {
   return 1
 }
 
+# Like sent_header, with an RFC 2047 encoded-word decoded.
+sent_header_text() {
+  local value
+  value=$(sent_header "$1") || return 1
+  case $value in
+    '=?UTF-8?B?'*'?=')
+      value=${value#=?UTF-8?B?}
+      printf '%s' "${value%?=}" | base64 --decode
+      ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
 file_mode() {
   stat -L -c '%a' "$1" 2>/dev/null || stat -L -f '%Lp' "$1"
 }

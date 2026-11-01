@@ -403,3 +403,36 @@ load helpers/common.sh
   [[ $(tail -n 1 "$ERROR_LOG") == *"HTTP 503" ]]
   [[ $(head -n 1 "$ERROR_LOG") == "$(repeat x 99)" ]]
 }
+
+# --- ntfy limits -------------------------------------------------------------------
+
+@test "send: a title over 1,000 bytes is cut without splitting a character" {
+  use_env_topic
+  run pushme -t "$(repeat あ 1400)" hi </dev/null
+  [ "$status" -eq 0 ]
+  [ "$(sent_header_text X-Title)" = "$(repeat あ 332)…" ]
+  run pushme -t "$(repeat a 1001)" hi </dev/null
+  [ "$(sent_header_text X-Title)" = "$(repeat a 997)…" ]
+  run pushme -t "$(repeat a 1000)" hi </dev/null
+  [ "$(sent_header X-Title)" = "$(repeat a 1000)" ]
+}
+
+@test "send: tags over 512 bytes drop the caller's last tags but keep the host tag" {
+  use_env_topic
+  local tag60 tags='' i
+  tag60=$(repeat t 60)
+  for i in 1 2 3 4 5 6 7 8 9 10; do tags=$tags,$i$tag60; done
+  run --separate-stderr pushme -T "$tags" hi </dev/null
+  [ "$status" -eq 0 ]
+  # 8 bytes of host tag + 8 tags of 61 bytes = 496; a ninth would make 557.
+  [[ $stderr == *"512 バイト"*"末尾の 2 個"* ]]
+  [ "$(sent_header X-Tags)" = "1$tag60,2$tag60,3$tag60,4$tag60,5$tag60,6$tag60,7$tag60,8$tag60,testhost" ]
+}
+
+@test "send: tags that exactly fit are all kept without a warning" {
+  use_env_topic
+  run --separate-stderr pushme -T "$(repeat a 252),$(repeat b 252)" hi </dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$stderr" ]
+  [ "$(sent_header X-Tags)" = "$(repeat a 252),$(repeat b 252),testhost" ]
+}
