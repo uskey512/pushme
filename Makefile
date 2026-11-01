@@ -20,7 +20,9 @@ install:
 test:
 	bats test
 
+# bats' run assigns $output, $stderr and friends behind shellcheck's back;
+# releases before 0.10 (Ubuntu's apt package) report them as SC2154.
 lint:
 	shellcheck $(SHELL_SOURCES)
-	shellcheck --severity=warning $(BATS_SOURCES)
+	shellcheck --severity=warning --exclude=SC2154 $(BATS_SOURCES)
 	shfmt $(SHFMT_FLAGS) -d $(SHELL_SOURCES)
