@@ -282,8 +282,8 @@ load helpers/common.sh
 
 @test "send: an unsupported backend is a usage error" {
   use_env_topic
-  PUSHME_BACKEND=pushover run -2 --separate-stderr pushme hi </dev/null
-  [[ $stderr == *"pushover"* ]]
+  PUSHME_BACKEND=carrier_pigeon run -2 --separate-stderr pushme hi </dev/null
+  [[ $stderr == *"carrier_pigeon"* ]] || false
 }
 
 @test "send: unknown options and options missing a value are usage errors" {

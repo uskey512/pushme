@@ -58,7 +58,11 @@ fail() {
 if [ -n "${INPUT_TOPIC:-}" ]; then export PUSHME_NTFY_TOPIC=$INPUT_TOPIC; fi
 if [ -n "${INPUT_SERVER:-}" ]; then export PUSHME_NTFY_URL=$INPUT_SERVER; fi
 if [ -n "${INPUT_TOKEN:-}" ]; then export PUSHME_NTFY_TOKEN=$INPUT_TOKEN; fi
-for secret in "${PUSHME_NTFY_TOPIC:-}" "${PUSHME_NTFY_TOKEN:-}"; do
+if [ -n "${INPUT_BACKEND:-}" ]; then export PUSHME_BACKEND=$INPUT_BACKEND; fi
+if [ -n "${INPUT_PUSHOVER_TOKEN:-}" ]; then export PUSHME_PUSHOVER_TOKEN=$INPUT_PUSHOVER_TOKEN; fi
+if [ -n "${INPUT_PUSHOVER_USER:-}" ]; then export PUSHME_PUSHOVER_USER=$INPUT_PUSHOVER_USER; fi
+for secret in "${PUSHME_NTFY_TOPIC:-}" "${PUSHME_NTFY_TOKEN:-}" \
+  "${PUSHME_PUSHOVER_TOKEN:-}" "${PUSHME_PUSHOVER_USER:-}"; do
   if [ -n "$secret" ]; then
     escape_data "$secret"
     printf '::add-mask::%s\n' "$REPLY"

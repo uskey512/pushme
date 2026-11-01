@@ -48,6 +48,16 @@ inputs:
     description: true にすると、通知に失敗したときにジョブを失敗させる。false なら警告だけ出す
     required: false
     default: "false"
+  backend:
+    description: 送信先。ntfy または pushover
+    required: false
+    default: ntfy
+  pushover-token:
+    description: Pushover の Application token。secrets から渡す
+    required: false
+  pushover-user:
+    description: Pushover の User key。secrets から渡す
+    required: false
 
 outputs:
   status:
@@ -77,5 +87,8 @@ runs:
         INPUT_ATTACH: ${{ inputs.attach }}
         INPUT_DRY_RUN: ${{ inputs.dry-run }}
         INPUT_FAIL_ON_ERROR: ${{ inputs.fail-on-error }}
+        INPUT_BACKEND: ${{ inputs.backend }}
+        INPUT_PUSHOVER_TOKEN: ${{ inputs.pushover-token }}
+        INPUT_PUSHOVER_USER: ${{ inputs.pushover-user }}
         PUSHME_HOSTNAME: ${{ github.repository }}
       run: bash "$GITHUB_ACTION_PATH/action/run.sh"
