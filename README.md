@@ -401,7 +401,7 @@ GitHub Actions では `backend: pushover` と、`pushover-token: ${{ secrets.PUS
 設定ファイルは `KEY=VALUE` 形式です。`#` で始まる行と空行は無視し、値の前後の空白と、値全体を囲む `"` / `'` は取り除きます。シェルスクリプトとしては実行しないので、`$(...)` などを書いても文字列のまま扱います。どの段階でも、空の値は未設定と同じ扱いです。
 
 ```sh
-PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+PUSHME_NTFY_TOPIC=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 | キー | 既定値 | 説明 |
