@@ -33,7 +33,7 @@ pushme init
 設定ファイル `~/.config/pushme/config` を作ります。最初にトピック名を尋ねます。
 
 - **すでにトピック名がある**: 貼り付けて Enter（入力した文字は画面に出ません）。`pbpaste | pushme init` のように標準入力から渡すこともできます
-- **初めて使う**: 空のまま Enter を押すと、新しいトピック名（`ntfy-` と英数字 59 文字、合計 64 文字）を生成します。表示されるのはこの 1 回だけなので、パスワード管理ツールに保存してください
+- **初めて使う**: 空のまま Enter を押すと、新しいトピック名（英数字 64 文字）を生成します。表示されるのはこの 1 回だけなので、パスワード管理ツールに保存してください
 
 トピック名をコマンドライン引数で渡す方法はありません（シェルの履歴に残るため）。設定ファイルが既にあるときは何もしません。作り直すには `pushme init --force` を使います。
 
@@ -401,7 +401,7 @@ GitHub Actions では `backend: pushover` と、`pushover-token: ${{ secrets.PUS
 設定ファイルは `KEY=VALUE` 形式です。`#` で始まる行と空行は無視し、値の前後の空白と、値全体を囲む `"` / `'` は取り除きます。シェルスクリプトとしては実行しないので、`$(...)` などを書いても文字列のまま扱います。どの段階でも、空の値は未設定と同じ扱いです。
 
 ```sh
-PUSHME_NTFY_TOPIC=ntfy-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+PUSHME_NTFY_TOPIC=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 | キー | 既定値 | 説明 |
