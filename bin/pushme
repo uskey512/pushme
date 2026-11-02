@@ -1419,9 +1419,9 @@ cmd_run() {
 
 generate_topic() {
   local rand
-  rand=$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 59)
-  [ "${#rand}" -eq 59 ] || return 1
-  printf 'ntfy-%s' "$rand"
+  rand=$(tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c 64)
+  [ "${#rand}" -eq 64 ] || return 1
+  printf '%s' "$rand"
 }
 
 config_template() {

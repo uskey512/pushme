@@ -11,8 +11,7 @@ topic_in_config() {
   [ "$status" -eq 0 ]
   local topic
   topic=$(topic_in_config)
-  [[ $topic =~ ^ntfy-[A-Za-z0-9]{59}$ ]]
-  [ "${#topic}" -eq 64 ]
+  [[ $topic =~ ^[A-Za-z0-9]{64}$ ]]
   [ "$(printf '%s\n' "$output" | grep -c -F "$topic")" -eq 1 ]
   [[ $output == *"パスワード管理ツール"* ]]
   [[ $output == *"ntfy アプリ"* ]]
