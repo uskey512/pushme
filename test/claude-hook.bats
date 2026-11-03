@@ -449,6 +449,25 @@ assert_quiet_success() {
   [[ $(cat "$ERROR_LOG") == *"jq が見つかりません"* ]]
 }
 
+@test "claude-hook: the hook returns before the send, which outlives the hook's process group" {
+  use_env_topic
+  unset PUSHME_TEST_WAIT_SEND
+  export FAKE_CURL_SLEEP=1
+  started_ago 60
+  # As claude -p does to a hook still running when it exits, the hook's
+  # process group is killed.
+  local pid
+  set -m
+  pushme claude-hook <"$FIXTURES/claude/stop.json" >/dev/null 3>&- &
+  pid=$!
+  set +m
+  wait "$pid"
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  [ "$(curl_calls)" -eq 0 ]
+  wait_for_calls 1
+  [ "$(sent_header_text X-Title)" = "my-project 完了" ]
+}
+
 @test "claude-hook: --dry-run prints to stderr and sends nothing" {
   use_env_topic
   hook stop-failure --dry-run

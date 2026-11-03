@@ -9,22 +9,25 @@
 #   $FAKE_CURL_DIR/N.method   GET, POST (data-raw, form) or PUT (upload-file)
 #   $FAKE_CURL_DIR/N.form-NAME  value of form-string NAME, or a copy of the
 #                             file of form NAME=@"path" (path in N.form-NAME.path)
-# and $FAKE_CURL_DIR/calls holds the number of calls so far.
+# and $FAKE_CURL_DIR/calls holds the number of calls so far, updated as the
+# call exits, once it has recorded all of this.
 #
 # Outcome knobs:
 #   FAKE_CURL_EXITS   curl exit codes for call 1, 2, ... (the last one repeats); default 0
 #   FAKE_CURL_STATUS  HTTP status; with --fail, 400 or above exits 22 like curl
 #   FAKE_CURL_BODY    response body printed when --output is not given
 #   FAKE_CURL_STDERR  replaces the error message printed on failure
+#   FAKE_CURL_SLEEP   seconds to wait before anything else, like a slow network
 
 set -u
 export LC_ALL=C
 
 dir=${FAKE_CURL_DIR:?FAKE_CURL_DIR must be set}
+[ -z "${FAKE_CURL_SLEEP:-}" ] || sleep "$FAKE_CURL_SLEEP"
 calls=0
 [ -f "$dir/calls" ] && calls=$(cat "$dir/calls")
 n=$((calls + 1))
-echo "$n" >"$dir/calls"
+trap 'echo "$n" >"$dir/calls"' EXIT
 
 printf '%s\n' "$@" >"$dir/$n.args"
 : >"$dir/$n.headers"

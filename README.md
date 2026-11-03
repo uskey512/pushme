@@ -233,6 +233,8 @@ Claude Code のプラグインとして入れると、次のときに通知が�
 - プロジェクト名はディレクトリ名だけで、フルパスは送りません
 - サブエージェントの終了では通知しません
 - 「完了」と「承認待ち」は、しばらく応答がないときだけ送るようにもできます（[席を外しているときだけ通知する](#席を外しているときだけ通知する)）
+- `claude -p`（非対話モード）でも「完了」が届きます。`-p` は終わるときに、まだ動いている非同期（`"async": true`）の hook を止めてしまうので、`Stop` の hook だけは同期で動かしています。送信は hook から切り離したプロセスで行うため、hook はすぐ終わり、Claude Code を待たせません
+- `claude -p` では「エラー」は届きません。`-p` は `StopFailure` の hook を同期でも待たずに終わり、そのときに止めてしまうためです
 
 ### インストール
 
@@ -262,7 +264,7 @@ claude plugin update pushme@pushme
 
 ### プラグインを使わない場合
 
-[examples/claude-settings.snippet.json](examples/claude-settings.snippet.json) の `hooks` の中身を `~/.claude/settings.json` の `"hooks"` に追記し、`/path/to/pushme` を実際の場所に書き換えます。プラグインと両方を設定すると、同じ通知が 2 回届きます。
+[examples/claude-settings.snippet.json](examples/claude-settings.snippet.json) の `hooks` の中身を `~/.claude/settings.json` の `"hooks"` に追記し、`/path/to/pushme` を実際の場所に書き換えます。プラグインと両方を設定すると、同じ通知が 2 回届きます。以前の examples から追記した場合は、`Stop` の hook から `"async": true` を外してください（外さないと、`claude -p` では「完了」が届きません）。
 
 ### 動作確認
 
@@ -330,6 +332,7 @@ PUSHME_CODEX_DELAY_SECONDS=300
 - 遅らせているあいだに同じ種類の通知がまた来たら、新しいほうだけを送ります
 - サブエージェントの承認待ちは、ほかのエージェントがツールを使っても取り消しません
 - Claude Code のエラーの通知は遅らせません
+- `claude -p` では、返答のすぐあとにセッションが終わるため、遅らせた「完了」は取り消されて届きません
 - おやすみ時間は、実際に送る時点の時刻で判定します
 - `--dry-run` では、遅らせずにすぐ表示します（何秒後に送るかも表示します）
 

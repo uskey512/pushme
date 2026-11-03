@@ -5,7 +5,7 @@
       { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "async": true, "timeout": 10 } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "async": true, "timeout": 30 } ] }
+      { "hooks": [ { "type": "command", "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/pushme\" claude-hook", "timeout": 10 } ] }
     ],
     "Notification": [
       {
