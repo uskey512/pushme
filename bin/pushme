@@ -24,6 +24,11 @@ NTFY_TITLE_MAX=1000
 NTFY_TAGS_MAX=512
 # The attachment size limit of the ntfy.sh free tier.
 NTFY_ATTACH_MAX_DEFAULT=2097152
+# ntfy.sh keeps an attachment for 3 hours and refuses one that would expire
+# before its delayed message is delivered. It also refuses a delay under 10
+# seconds by its own clock, so the shortest one sent leaves some room.
+NTFY_ATTACH_EXPIRY=10800
+NTFY_DELAY_MIN=15
 PUSHOVER_API=https://api.pushover.net/1
 # Pushover's limits are in characters; cutting to as many bytes keeps the
 # character count under them too.
@@ -539,18 +544,20 @@ dnd_parse_time() {
   REPLY=$((10#${1%%:*} * 60 + 10#${1#*:}))
 }
 
-# Sets REPLY to the current minutes since midnight, in PUSHME_DND_TZ when set.
-# PUSHME_TEST_NOW (HHMM) pins the clock for the test suite.
+# Sets REPLY to the current minutes since midnight, in PUSHME_DND_TZ when set,
+# and dnd_second to the seconds into that minute. PUSHME_TEST_NOW (HHMM or
+# HHMMSS) pins the clock for the test suite.
 dnd_now() {
-  local hhmm
+  local now
   if [ -n "${PUSHME_TEST_NOW:-}" ]; then
-    hhmm=$PUSHME_TEST_NOW
+    now=${PUSHME_TEST_NOW}00
   elif [ -n "$cfg_dnd_tz" ]; then
-    hhmm=$(TZ=$cfg_dnd_tz date +%H%M)
+    now=$(TZ=$cfg_dnd_tz date +%H%M%S)
   else
-    hhmm=$(date +%H%M)
+    now=$(date +%H%M%S)
   fi
-  REPLY=$((10#${hhmm:0:2} * 60 + 10#${hhmm:2:2}))
+  dnd_second=$((10#${now:4:2}))
+  REPLY=$((10#${now:0:2} * 60 + 10#${now:2:2}))
 }
 
 # Checks the DnD settings. Given minutes since midnight in $1, also sets
@@ -561,9 +568,9 @@ config_check_dnd() {
   local rest range start end
   dnd_range=''
   case $cfg_dnd_mode in
-    skip | quiet) ;;
+    skip | quiet | defer) ;;
     *)
-      problem="PUSHME_DND_MODE は skip か quiet にしてください"
+      problem="PUSHME_DND_MODE は skip・quiet・defer のどれかにしてください"
       return 1
       ;;
   esac
@@ -601,6 +608,21 @@ config_check_dnd() {
     fi
   done
   return 0
+}
+
+# Sets REPLY to the minutes from $1, minutes since midnight within the DnD
+# hours, until they end, going on through a range that the previous one ends
+# inside. Returns 1 when they cover the whole day. These are wall-clock
+# minutes, so a DST change within the hours moves the end by the change.
+dnd_minutes_left() {
+  local at=$1 total=0
+  while config_check_dnd "$at" && [ -n "$dnd_range" ]; do
+    [ "$total" -lt 1440 ] || return 1
+    dnd_parse_time "${dnd_range#*-}"
+    total=$((total + (REPLY - at + 1440) % 1440))
+    at=$REPLY
+  done
+  REPLY=$total
 }
 
 # --- HTTP --------------------------------------------------------------------
@@ -757,6 +779,11 @@ backend_ntfy_send() {
       warn "$note"
       body=${body:+$body$'\n\n'}$note
       attach=''
+    elif [ -n "$msg_delay" ] && [ "$msg_delay" -gt "$NTFY_ATTACH_EXPIRY" ]; then
+      note="添付ファイル $filename は、届くまでに ntfy.sh の保存期間（3 時間）を過ぎるため送っていません"
+      warn "$note"
+      body=${body:+$body$'\n\n'}$note
+      attach=''
     fi
   fi
   if [ -n "$attach" ]; then
@@ -775,6 +802,7 @@ backend_ntfy_send() {
     if [ -n "$tags" ]; then printf 'X-Tags: %s\n' "$tags"; fi
     if [ -n "$msg_click" ]; then printf 'X-Click: %s\n' "$msg_click"; fi
     if [ "$msg_markdown" = 1 ]; then printf 'X-Markdown: yes\n'; fi
+    if [ -n "$msg_delay" ]; then printf 'X-Delay: %ss\n' "$msg_delay"; fi
     if [ -n "$msg_attach_url" ]; then printf 'X-Attach: %s\n' "$msg_attach_url"; fi
     if [ -n "$filename" ]; then printf 'Filename: %s\n' "$filename"; fi
     if [ -n "$cfg_ntfy_token" ]; then printf 'Authorization: Bearer %s\n' "$(mask "$cfg_ntfy_token")"; fi
@@ -794,6 +822,7 @@ backend_ntfy_send() {
   if [ -n "$tags" ]; then curl_conf_header X-Tags "$tags"; fi
   if [ -n "$msg_click" ]; then curl_conf_header X-Click "$msg_click"; fi
   if [ "$msg_markdown" = 1 ]; then curl_conf_add header "X-Markdown: yes"; fi
+  if [ -n "$msg_delay" ]; then curl_conf_add header "X-Delay: ${msg_delay}s"; fi
   if [ -n "$msg_attach_url" ]; then curl_conf_header X-Attach "$msg_attach_url"; fi
   if [ -n "$filename" ]; then curl_conf_header Filename "$filename"; fi
   if [ -n "$cfg_ntfy_token" ]; then curl_conf_add header "Authorization: Bearer $cfg_ntfy_token"; fi
@@ -1144,30 +1173,62 @@ load_valid_config() {
 }
 
 # Sends msg_* through the backend unless the do-not-disturb hours hold it
-# back, in which case dnd_skipped=1 and the return value is 0. Priority 5
-# always goes through.
+# back: skipped, or with PUSHME_DND_MODE=defer handed to ntfy for delivery
+# when they end. Then dnd_held=1 and the outcome has been reported. Priority
+# 5 always goes through.
 deliver_message() {
-  local range
-  dnd_skipped=0
+  local now range mode ends
+  dnd_held=0
+  msg_delay=''
   if [ -n "$cfg_dnd" ]; then
     dnd_now
-    config_check_dnd "$REPLY" || return 1
+    now=$REPLY
+    config_check_dnd "$now" || return 1
   else
     dnd_range=''
   fi
   range=$dnd_range
   if [ -n "$range" ] && [ "$opt_ignore_dnd" != 1 ] && [ "$msg_priority" != 5 ]; then
-    if [ "$cfg_dnd_mode" = skip ]; then
-      dnd_skipped=1
-      if [ "$opt_dry_run" = 1 ]; then
-        printf 'pushme: dry-run: おやすみ時間（%s）のため送りません\n' "$range"
-      elif [ "$opt_quiet" != 1 ]; then
-        printf 'pushme: おやすみ時間（%s）のため送りませんでした\n' "$range" >&2
+    mode=$cfg_dnd_mode
+    if [ "$mode" = defer ]; then
+      if [ "$cfg_backend" != ntfy ]; then
+        mode=quiet
+      elif ! dnd_minutes_left "$now"; then
+        mode=skip
       fi
-      return 0
     fi
-    msg_priority=1
-    if [ "$opt_dry_run" = 1 ]; then printf 'おやすみ時間（%s）: 優先度 1 で送ります\n' "$range"; fi
+    case $mode in
+      skip)
+        dnd_held=1
+        if [ "$opt_dry_run" = 1 ]; then
+          printf 'pushme: dry-run: おやすみ時間（%s）のため送りません\n' "$range"
+        elif [ "$opt_quiet" != 1 ]; then
+          printf 'pushme: おやすみ時間（%s）のため送りませんでした\n' "$range" >&2
+        fi
+        return 0
+        ;;
+      quiet)
+        msg_priority=1
+        if [ "$opt_dry_run" = 1 ] && [ "$cfg_dnd_mode" = defer ]; then
+          printf 'おやすみ時間（%s）: Pushover は配信を予約できないため、優先度 1 で送ります\n' "$range"
+        elif [ "$opt_dry_run" = 1 ]; then
+          printf 'おやすみ時間（%s）: 優先度 1 で送ります\n' "$range"
+        fi
+        ;;
+      defer)
+        ends=$(((now + REPLY) % 1440))
+        ends=$(printf '%02d:%02d' $((ends / 60)) $((ends % 60)))
+        msg_delay=$((REPLY * 60 - dnd_second))
+        [ "$msg_delay" -ge "$NTFY_DELAY_MIN" ] || msg_delay=$NTFY_DELAY_MIN
+        if [ "$opt_dry_run" = 1 ]; then printf 'おやすみ時間（%s）: %s に届くよう予約して送ります\n' "$range" "$ends"; fi
+        "backend_${cfg_backend}_send" || return 1
+        dnd_held=1
+        if [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+          printf 'pushme: おやすみ時間（%s）のため、%s に届くよう予約しました\n' "$range" "$ends" >&2
+        fi
+        return 0
+        ;;
+    esac
   elif [ "$opt_dry_run" = 1 ] && [ -n "$cfg_dnd" ]; then
     if [ -z "$range" ]; then
       printf 'おやすみ時間: 対象外\n'
@@ -1253,7 +1314,7 @@ cmd_send() {
   fi
 
   deliver_message || exit "$EX_FAIL"
-  if [ "$dnd_skipped" != 1 ] && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+  if [ "$dnd_held" != 1 ] && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
     printf '%s\n' 'pushme: 送信しました'
   fi
 }
@@ -1433,7 +1494,7 @@ cmd_run() {
   if [ "$can_notify" = 1 ]; then
     run_build_message "$rc" "$elapsed" "$tail_lines" "$output" "$@"
     # stdout belongs to the command, so pushme's own report goes to stderr.
-    if deliver_message && [ "$dnd_skipped" != 1 ] && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
+    if deliver_message && [ "$dnd_held" != 1 ] && [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
       printf '%s\n' 'pushme: 通知を送りました' >&2
     fi
   fi
@@ -1982,6 +2043,9 @@ cmd_doctor() {
     doctor_report -- "おやすみ時間: 設定なし"
   else
     doctor_report OK "おやすみ時間: ${cfg_dnd}（${cfg_dnd_mode}、タイムゾーン ${cfg_dnd_tz:-マシンのローカル時刻}）"
+    if [ "$cfg_dnd_mode" = defer ] && [ "$cfg_backend" != ntfy ]; then
+      doctor_report '!!' "おやすみ時間: Pushover は配信を予約できないため、defer は quiet と同じく優先度 1 で送ります"
+    fi
     if [ -n "$dnd_range" ]; then
       doctor_report -- "現在はおやすみ時間中です（${dnd_range}）"
     else

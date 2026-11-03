@@ -101,6 +101,7 @@ else
   case $diagnostics in
     # pushme exits 0 when the do-not-disturb hours hold a message back.
     *'のため送りませんでした'*) set_output status skipped ;;
+    *'に届くよう予約しました'*) set_output status deferred ;;
     *) set_output status sent ;;
   esac
 fi

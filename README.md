@@ -140,7 +140,7 @@ cron は、ジョブが何か出力するとメールを送ります。成功時
 
 ## おやすみ時間
 
-決めた時間帯には通知を送らない（または音を鳴らさずに送る）ようにできます。`send`・`run`・Claude Code・Codex・GitHub Actions のどこから送る場合にも、Pushover で受け取る場合にも効きます。
+決めた時間帯には通知を送らない、音を鳴らさずに送る、または時間帯が明けてから届ける、のどれかにできます。`send`・`run`・Claude Code・Codex・GitHub Actions のどこから送る場合にも、Pushover で受け取る場合にも効きます。
 
 ```sh
 # 設定ファイルに書く
@@ -149,12 +149,12 @@ PUSHME_DND_MODE=quiet
 ```
 
 - `PUSHME_DND` には `HH:MM-HH:MM` をカンマ区切りで書きます。終わりが始まりより前なら日をまたぎます。始まりの時刻は含み、終わりの時刻は含みません（`23:00-07:00` なら 23:00 から 6:59 まで）
-- `PUSHME_DND_MODE=skip`（既定）は送りません。`quiet` は優先度を 1（音もバイブも鳴らない）に下げて送ります
+- `PUSHME_DND_MODE=skip`（既定）は送りません。`quiet` は優先度を 1（音もバイブも鳴らない）に下げて送ります。`defer` は、おやすみ時間が終わる時刻に届くよう配信を予約します（[おやすみ時間が明けてから届ける](#おやすみ時間が明けてから届ける)）
 - **優先度 5（`-p urgent`）の通知は、おやすみ時間でも送ります。** 緊急の通知を取りこぼさないためです
 - その場かぎりで無視したいときは、`send` や `run` に `--ignore-dnd` を付けます
 - 時刻はマシンのローカル時刻で判定します。別のタイムゾーンで判定したいときは `PUSHME_DND_TZ`（例 `Asia/Tokyo`）を指定します
 - 送らなかったときも終了コードは 0 です（`run` はコマンドの終了コード）。理由は標準エラー出力に出します（`-q` なら出しません）。今がおやすみ時間かどうかは `pushme doctor` で、何が起きるかは `--dry-run` で確かめられます
-- スマートフォン側のおやすみモード（Android の「サイレント モード」、iOS の「集中モード」など）とは別の仕組みです。pushme の側で送らないので、ntfy.sh の 1 日 250 通の枠も使いません
+- スマートフォン側のおやすみモード（Android の「サイレント モード」、iOS の「集中モード」など）とは別の仕組みです。`skip` なら pushme の側で送らないので、ntfy.sh の 1 日 250 通の枠も使いません
 
 GitHub Actions のランナーの時刻は UTC なので、`PUSHME_DND_TZ` が必要です。ステップの `env:` に書きます。
 
@@ -167,6 +167,22 @@ GitHub Actions のランナーの時刻は UTC なので、`PUSHME_DND_TZ` が�
           topic: ${{ secrets.NTFY_TOPIC }}
           message: nightly build finished
 ```
+
+### おやすみ時間が明けてから届ける
+
+```sh
+PUSHME_DND=23:00-07:00
+PUSHME_DND_MODE=defer
+```
+
+夜のうちに終わったジョブの通知が、朝 7:00 にふだんの優先度で届きます。ntfy の予約配信（`X-Delay`）を使います。
+
+- 通知はその場で ntfy のサーバーに送り、届くのはおやすみ時間が終わる時刻です。ntfy.sh の 1 日 250 通の枠は、送った日の分を使います
+- 予約した通知は取り消せません。たとえば Claude Code の承認待ちに夜のうちに答えても、朝に届きます
+- `22:00-00:00,00:00-07:00` のように続けて書いたおやすみ時間は、最後に終わる時刻（この例では 7:00）まで遅らせます。一日中がおやすみ時間になる設定では、`skip` と同じく送りません
+- 届くまでに 3 時間より長くかかる通知には、ファイルを添付しません。ntfy.sh は添付ファイルを 3 時間で消し、それより後に届く通知への添付を受け付けないためです。添付しなかったことは本文に書き足します（`--attach-url` の URL はそのまま送ります）
+- Pushover には予約配信がないため、`quiet` と同じく優先度 1 で送ります。`pushme doctor` でも警告します
+- 夏時間の切り替えをまたぐと、届く時刻がその差だけずれます
 
 ## コマンドの終了を通知する（run）
 
@@ -390,7 +406,7 @@ jobs:
 
 | 出力 | 説明 |
 |---|---|
-| `status` | `sent` / `skipped`（おやすみ時間で送らなかった）/ `dry-run` / `failed` のどれか |
+| `status` | `sent` / `deferred`（おやすみ時間が明けてから届くよう予約した）/ `skipped`（おやすみ時間で送らなかった）/ `dry-run` / `failed` のどれか |
 | `dry-run-output` | `dry-run` のときに表示した送信内容（トピック名とトークンは伏せ字） |
 
 ## Pushover で受け取る
@@ -454,7 +470,7 @@ PUSHME_NTFY_TOPIC=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_PUSHOVER_USER` | なし | Pushover の User Key（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_DEVICE` | なし | 送る端末の名前（カンマ区切りで複数）。なければすべての端末 |
 | `PUSHME_DND` | なし | おやすみ時間。`HH:MM-HH:MM` をカンマ区切り（「おやすみ時間」の節を参照） |
-| `PUSHME_DND_MODE` | `skip` | おやすみ時間の動作。`skip`（送らない）または `quiet`（優先度 1 で送る） |
+| `PUSHME_DND_MODE` | `skip` | おやすみ時間の動作。`skip`（送らない）、`quiet`（優先度 1 で送る）、`defer`（明けてから届くよう予約する） |
 | `PUSHME_DND_TZ` | マシンのローカル時刻 | おやすみ時間の判定に使うタイムゾーン（例 `Asia/Tokyo`） |
 | `PUSHME_CURL` | `curl` | 使う curl コマンド。**環境変数でだけ**指定できる（設定ファイルに書いても無視する） |
 
