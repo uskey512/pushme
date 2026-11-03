@@ -1,7 +1,7 @@
 # ~/.codex/config.toml に追記する pushme の hook。
 # hooks.json を使っている場合は、こちらではなく codex-hooks.snippet.json の内容を hooks.json に書く
 # （同じ場所に hooks.json と [hooks] が両方あると、Codex が起動時に警告を出す）。
-# Interrupt の timeout は Codex の上限が 3 秒。
+# Interrupt と SessionEnd の timeout は Codex の上限が 3 秒。
 
 [[hooks.UserPromptSubmit]]
 [[hooks.UserPromptSubmit.hooks]]
@@ -26,6 +26,20 @@ async = true
 
 [[hooks.Interrupt]]
 [[hooks.Interrupt.hooks]]
+type = "command"
+command = '"$HOME/.local/bin/pushme" codex-hook'
+timeout = 3
+async = true
+
+[[hooks.PostToolUse]]
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command = '"$HOME/.local/bin/pushme" codex-hook'
+timeout = 10
+async = true
+
+[[hooks.SessionEnd]]
+[[hooks.SessionEnd.hooks]]
 type = "command"
 command = '"$HOME/.local/bin/pushme" codex-hook'
 timeout = 3

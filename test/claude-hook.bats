@@ -4,20 +4,31 @@ load helpers/common.sh
 
 SESSION=abc12345-6789-4def-8123-456789abcdef
 
+# fd 3 is closed because bats waits for every process holding it, and a
+# held-back notification's process outlives the hook.
 hook() {
   local fixture=$1
   shift
-  run --separate-stderr pushme claude-hook "$@" <"$FIXTURES/claude/$fixture.json"
+  run --separate-stderr pushme claude-hook "$@" <"$FIXTURES/claude/$fixture.json" 3>&-
 }
 
 # Runs the hook with a fixture whose fields are changed by the jq filter $2.
 hook_with() {
   jq "$2" "$FIXTURES/claude/$1.json" >"$BATS_TEST_TMPDIR/event.json"
-  run --separate-stderr pushme claude-hook <"$BATS_TEST_TMPDIR/event.json"
+  run --separate-stderr pushme claude-hook <"$BATS_TEST_TMPDIR/event.json" 3>&-
 }
 
 state_dir() {
   printf '%s/pushme/claude' "$XDG_STATE_HOME"
+}
+
+# Number of notifications of kind $1 held back for the session.
+held() {
+  local file n=0
+  for file in "$(state_dir)/$SESSION.$1".*; do
+    [ -f "$file" ] && n=$((n + 1))
+  done
+  echo "$n"
 }
 
 started_ago() {
@@ -187,6 +198,147 @@ assert_quiet_success() {
   assert_quiet_success
   [ "$(curl_calls)" -eq 0 ]
   [ ! -e "$(state_dir)" ]
+}
+
+# --- held back (PUSHME_CLAUDE_DELAY_SECONDS) ----------------------------------------------
+
+@test "claude-hook: with a delay, an unanswered permission prompt is reported afterwards" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=1
+  hook notification-permission
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(held ask)" -eq 1 ]
+  wait_for_calls 1
+  [ "$(sent_header_text X-Title)" = "my-project 承認待ち" ]
+  [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nClaude needs your permission to use Bash')" ]
+  [ "$(held ask)" -eq 0 ]
+}
+
+@test "claude-hook: with a delay, a finished turn is not reported once the user writes again" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=1
+  started_ago 60
+  hook stop
+  assert_quiet_success
+  [ "$(held finished)" -eq 1 ]
+  hook user-prompt-submit
+  assert_quiet_success
+  [ "$(held finished)" -eq 0 ]
+  sleep 2
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "claude-hook: a finished turn is reported after the delay with its elapsed time" {
+  use_env_topic
+  write_config "PUSHME_CLAUDE_DELAY_SECONDS=1"
+  started_ago 200
+  hook stop
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  wait_for_calls 1
+  [ "$(sent_header_text X-Title)" = "my-project 完了" ]
+  [[ $(head -n 1 "$(sent body)") =~ ^3m2[0-2]s\ ·\ session\ abc12345$ ]]
+}
+
+@test "claude-hook: only the asking agent's next tool call cancels its prompt" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=100
+  hook_with permission-request '.agent_id = "agent-def456"'
+  assert_quiet_success
+  hook notification-permission
+  [ "$(held ask)" -eq 1 ]
+  hook post-tool-use
+  [ "$(held ask)" -eq 1 ]
+  hook_with post-tool-use '.agent_id = "other-agent"'
+  [ "$(held ask)" -eq 1 ]
+  hook_with post-tool-use '.agent_id = "agent-def456" | .hook_event_name = "PostToolUseFailure"'
+  assert_quiet_success
+  [ "$(held ask)" -eq 0 ]
+  [ ! -e "$(state_dir)/$SESSION.asker" ]
+}
+
+@test "claude-hook: without a PermissionRequest the prompt is the main conversation's" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=100
+  hook notification-permission
+  hook_with post-tool-use '.agent_id = "agent-def456"'
+  [ "$(held ask)" -eq 1 ]
+  hook post-tool-use
+  [ "$(held ask)" -eq 0 ]
+}
+
+@test "claude-hook: Stop and StopFailure cancel the main conversation's prompt" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=100
+  hook notification-permission
+  hook stop
+  [ "$(held ask)" -eq 0 ]
+  hook notification-permission
+  hook stop-failure
+  [ "$(held ask)" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(sent_header_text X-Title)" = "my-project エラー" ]
+  hook_with permission-request '.agent_id = "agent-def456"'
+  hook notification-permission
+  hook stop
+  [ "$(held ask)" -eq 1 ]
+}
+
+@test "claude-hook: UserPromptSubmit and SessionEnd cancel everything held back" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=100
+  local event
+  for event in user-prompt-submit session-end; do
+    started_ago 60
+    hook stop
+    hook_with permission-request '.agent_id = "agent-def456"'
+    hook notification-permission
+    [ "$(held finished)" -eq 1 ] && [ "$(held ask)" -eq 1 ]
+    hook "$event"
+    assert_quiet_success
+    [ "$(held finished)" -eq 0 ] && [ "$(held ask)" -eq 0 ]
+  done
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "claude-hook: a newer prompt replaces the one held back" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=1
+  hook notification-permission
+  hook_with notification-permission '.notification_type = "elicitation_dialog" | .message = "Pick a branch"'
+  [ "$(held ask)" -eq 1 ]
+  wait_for_calls 1
+  sleep 1
+  [ "$(curl_calls)" -eq 1 ]
+  [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nPick a branch')" ]
+}
+
+@test "claude-hook: tool calls with nothing held back leave no trace" {
+  use_env_topic
+  hook post-tool-use
+  assert_quiet_success
+  [ ! -e "$(state_dir)" ]
+}
+
+@test "claude-hook: --dry-run with a delay says when it would send" {
+  use_env_topic
+  PUSHME_CLAUDE_DELAY_SECONDS=300 hook notification-permission --dry-run
+  assert_quiet_success
+  [[ $stderr == *"300 秒後、それまでに応答がなければ送ります"* ]]
+  [[ $stderr == *"X-Title: my-project 承認待ち"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "claude-hook: an invalid PUSHME_CLAUDE_DELAY_SECONDS is logged and reported by doctor" {
+  use_env_topic
+  export PUSHME_CLAUDE_DELAY_SECONDS=5m
+  hook notification-permission
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  [[ $(cat "$ERROR_LOG") == *"PUSHME_CLAUDE_DELAY_SECONDS"* ]]
+  run -1 pushme doctor </dev/null
+  [[ $output == *"[NG] PUSHME_CLAUDE_DELAY_SECONDS"* ]]
 }
 
 # --- project name ---------------------------------------------------------------------

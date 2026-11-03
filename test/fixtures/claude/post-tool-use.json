@@ -1,0 +1,12 @@
+{
+  "session_id": "abc12345-6789-4def-8123-456789abcdef",
+  "transcript_path": "/home/someone/.claude/projects/example/abc12345.jsonl",
+  "cwd": "/home/someone/src/my-project",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf build && npm test", "description": "Rebuild and run the tests" },
+  "tool_response": { "stdout": "ok", "stderr": "", "interrupted": false },
+  "tool_use_id": "toolu_01ABCDEF",
+  "duration_ms": 4200
+}

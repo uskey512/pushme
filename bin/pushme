@@ -319,9 +319,11 @@ cfg_reset() {
   cfg_ntfy_attach_max=
   cfg_claude_min_seconds=
   cfg_claude_include_message=
+  cfg_claude_delay_seconds=
   cfg_codex_min_seconds=
   cfg_codex_include_message=
   cfg_codex_notify_permission=
+  cfg_codex_delay_seconds=
   cfg_dnd=
   cfg_dnd_mode=
   cfg_dnd_tz=
@@ -362,9 +364,11 @@ config_read_file() {
       PUSHME_NTFY_ATTACH_MAX) cfg_ntfy_attach_max=$value ;;
       PUSHME_CLAUDE_MIN_SECONDS) cfg_claude_min_seconds=$value ;;
       PUSHME_CLAUDE_INCLUDE_MESSAGE) cfg_claude_include_message=$value ;;
+      PUSHME_CLAUDE_DELAY_SECONDS) cfg_claude_delay_seconds=$value ;;
       PUSHME_CODEX_MIN_SECONDS) cfg_codex_min_seconds=$value ;;
       PUSHME_CODEX_INCLUDE_MESSAGE) cfg_codex_include_message=$value ;;
       PUSHME_CODEX_NOTIFY_PERMISSION) cfg_codex_notify_permission=$value ;;
+      PUSHME_CODEX_DELAY_SECONDS) cfg_codex_delay_seconds=$value ;;
       PUSHME_DND) cfg_dnd=$value ;;
       PUSHME_DND_MODE) cfg_dnd_mode=$value ;;
       PUSHME_DND_TZ) cfg_dnd_tz=$value ;;
@@ -386,9 +390,11 @@ config_read_env() {
   if [ -n "${PUSHME_NTFY_ATTACH_MAX:-}" ]; then cfg_ntfy_attach_max=$PUSHME_NTFY_ATTACH_MAX; fi
   if [ -n "${PUSHME_CLAUDE_MIN_SECONDS:-}" ]; then cfg_claude_min_seconds=$PUSHME_CLAUDE_MIN_SECONDS; fi
   if [ -n "${PUSHME_CLAUDE_INCLUDE_MESSAGE:-}" ]; then cfg_claude_include_message=$PUSHME_CLAUDE_INCLUDE_MESSAGE; fi
+  if [ -n "${PUSHME_CLAUDE_DELAY_SECONDS:-}" ]; then cfg_claude_delay_seconds=$PUSHME_CLAUDE_DELAY_SECONDS; fi
   if [ -n "${PUSHME_CODEX_MIN_SECONDS:-}" ]; then cfg_codex_min_seconds=$PUSHME_CODEX_MIN_SECONDS; fi
   if [ -n "${PUSHME_CODEX_INCLUDE_MESSAGE:-}" ]; then cfg_codex_include_message=$PUSHME_CODEX_INCLUDE_MESSAGE; fi
   if [ -n "${PUSHME_CODEX_NOTIFY_PERMISSION:-}" ]; then cfg_codex_notify_permission=$PUSHME_CODEX_NOTIFY_PERMISSION; fi
+  if [ -n "${PUSHME_CODEX_DELAY_SECONDS:-}" ]; then cfg_codex_delay_seconds=$PUSHME_CODEX_DELAY_SECONDS; fi
   if [ -n "${PUSHME_DND:-}" ]; then cfg_dnd=$PUSHME_DND; fi
   if [ -n "${PUSHME_DND_MODE:-}" ]; then cfg_dnd_mode=$PUSHME_DND_MODE; fi
   if [ -n "${PUSHME_DND_TZ:-}" ]; then cfg_dnd_tz=$PUSHME_DND_TZ; fi
@@ -439,8 +445,9 @@ load_config() {
   config_read_env
   : "${cfg_backend:=ntfy}" "${cfg_ntfy_url:=$NTFY_DEFAULT_URL}" "${cfg_timeout:=10}" "${cfg_curl:=curl}"
   : "${cfg_ntfy_attach_max:=$NTFY_ATTACH_MAX_DEFAULT}"
-  : "${cfg_claude_min_seconds:=30}" "${cfg_claude_include_message:=1}"
+  : "${cfg_claude_min_seconds:=30}" "${cfg_claude_include_message:=1}" "${cfg_claude_delay_seconds:=0}"
   : "${cfg_codex_min_seconds:=30}" "${cfg_codex_include_message:=1}" "${cfg_codex_notify_permission:=1}"
+  : "${cfg_codex_delay_seconds:=0}"
   : "${cfg_dnd_mode:=skip}"
   while :; do
     case $cfg_ntfy_url in
@@ -480,6 +487,12 @@ config_check_claude() {
       return 1
       ;;
   esac
+  case $cfg_claude_delay_seconds in
+    '' | *[!0-9]*)
+      problem="PUSHME_CLAUDE_DELAY_SECONDS は 0 以上の整数（秒）にしてください"
+      return 1
+      ;;
+  esac
   case $cfg_claude_include_message in
     0 | 1) ;;
     *)
@@ -493,6 +506,12 @@ config_check_codex() {
   case $cfg_codex_min_seconds in
     '' | *[!0-9]*)
       problem="PUSHME_CODEX_MIN_SECONDS は 0 以上の整数（秒）にしてください"
+      return 1
+      ;;
+  esac
+  case $cfg_codex_delay_seconds in
+    '' | *[!0-9]*)
+      problem="PUSHME_CODEX_DELAY_SECONDS は 0 以上の整数（秒）にしてください"
       return 1
       ;;
   esac
@@ -1568,11 +1587,13 @@ hook_identify() {
   hook_record=$hook_state_dir/$session_id
 }
 
+hook_make_state_dir() {
+  [ -n "$hook_session_id" ] || return 1
+  [ -d "$hook_state_dir" ] || { mkdir -p "$hook_state_dir" && chmod 700 "$hook_state_dir"; }
+}
+
 hook_record_start() {
-  [ -n "$hook_session_id" ] || return 0
-  if [ ! -d "$hook_state_dir" ]; then
-    mkdir -p "$hook_state_dir" && chmod 700 "$hook_state_dir" || return 0
-  fi
+  hook_make_state_dir || return 0
   date +%s >"$hook_record"
   # Sessions that never reach Stop leave their record behind.
   find "$hook_state_dir" -type f -mmin +10080 -exec rm -f {} + 2>/dev/null
@@ -1619,37 +1640,128 @@ hook_join_fields() {
   REPLY=$body
 }
 
-# Sends title $1, emoji tag $2 and body $3, tagged with the project.
-hook_send() {
+# Sets msg_* to title $1, emoji tag $2 and body $3, tagged with the project.
+hook_message() {
   msg_title=$1
   msg_priority=4
   msg_tags=$2${hook_project_tag:+,$hook_project_tag}
   msg_body=$3
   set_message_host
+}
+
+hook_send() {
+  hook_message "$@"
   deliver_message
 }
 
+# A held-back notification is the file $hook_record.KIND.TOKEN plus a
+# detached process that sends the message once the delay is over, if the
+# file is still there. KIND is "finished" (the turn ended) or "ask" (a
+# prompt waits for an answer); a session has at most one of each. The file
+# holds the agent the wait belongs to, empty for the main conversation.
+
+# Arguments: delay in seconds, kind, waiting agent, then those of
+# hook_message. Sends at once when the delay is 0 or the session is unknown.
+hook_send_later() {
+  local delay=$1 kind=$2 agent=$3 pending
+  shift 3
+  hook_message "$@"
+  if [ $((10#$delay)) -eq 0 ] || ! hook_make_state_dir; then
+    deliver_message
+    return
+  fi
+  hook_cancel "$kind"
+  if [ "$opt_dry_run" = 1 ]; then
+    printf '%s 秒後、それまでに応答がなければ送ります\n' "$((10#$delay))"
+    deliver_message
+    return
+  fi
+  pending=$hook_record.$kind.$(date +%s).$$
+  if ! printf '%s' "$agent" >"$pending"; then
+    deliver_message
+    return
+  fi
+  # A process group of its own, so that whatever stops the hook's group
+  # leaves it running.
+  set -m
+  (
+    trap '' HUP
+    sleep "$((10#$delay))"
+    # Only one of this process and hook_cancel manages to remove the file.
+    rm "$pending" 2>/dev/null || exit 0
+    deliver_message
+  ) </dev/null >/dev/null 2>&1 &
+  set +m
+}
+
+# Removes the held-back notification of kind $1; with $2, only when its
+# wait belongs to that agent.
+hook_cancel() {
+  local file
+  [ -n "$hook_session_id" ] || return 0
+  for file in "$hook_record.$1".*; do
+    [ -f "$file" ] || continue
+    if [ $# -lt 2 ] || [ "$(cat "$file" 2>/dev/null)" = "$2" ]; then
+      rm -f "$file"
+    fi
+  done
+}
+
+# Returns 0 when any session under state directory $1 holds back a
+# notification of kind $2. Uses no jq, being run for every tool call.
+hook_any_held() {
+  local file
+  for file in "${XDG_STATE_HOME:-${HOME:-}/.local/state}/pushme/$1"/*."$2".*; do
+    [ -f "$file" ] && return 0
+  done
+  return 1
+}
+
 claude_hook_handle() {
-  local event elapsed
+  local event agent type asker='' elapsed
   hook_read_input claude-hook "Claude Code" || return 0
   event=$(hook_field '.hook_event_name // empty')
   case $event in
-    UserPromptSubmit | Stop | Notification | StopFailure) ;;
+    UserPromptSubmit | Stop | Notification | StopFailure | SessionEnd | PermissionRequest) ;;
+    PostToolUse | PostToolUseFailure)
+      hook_any_held claude ask || return 0
+      ;;
     *) return 0 ;;
   esac
+  agent=$(hook_field '.agent_id // empty')
   # A subagent or teammate shares the session, so its events must not start,
-  # end or report the main conversation's turn.
-  [ -z "$(hook_field '.agent_id // empty')" ] || return 0
+  # end or report the main conversation's turn. Its prompts are still the
+  # user's to answer, and Notification never says whose prompt it is.
+  case $event in
+    PermissionRequest | PostToolUse | PostToolUseFailure) ;;
+    *) [ -z "$agent" ] || return 0 ;;
+  esac
   hook_identify "${CLAUDE_PROJECT_DIR:-$(hook_field '.cwd // empty')}" "Claude Code" claude
 
   case $event in
     UserPromptSubmit)
+      hook_cancel finished
+      hook_cancel ask
       hook_record_start
+      ;;
+    SessionEnd)
+      hook_cancel finished
+      hook_cancel ask
+      ;;
+    PermissionRequest)
+      # For the permission_prompt Notification that follows.
+      hook_make_state_dir && printf '%s' "$agent" >"$hook_record.asker"
+      ;;
+    PostToolUse | PostToolUseFailure)
+      # The agent has got past its prompt. Approving a tool is only known
+      # here, once the tool has finished.
+      hook_cancel ask "$agent"
       ;;
     Stop)
       # true while Claude keeps working because a stop hook asked it to; the
       # turn has not ended yet.
       [ "$(hook_field '.stop_hook_active // empty')" != true ] || return 0
+      hook_cancel ask ''
       hook_take_elapsed || return 0
       elapsed=$REPLY
       if ! load_valid_config || ! config_check_claude; then
@@ -1658,21 +1770,28 @@ claude_hook_handle() {
       fi
       [ "$elapsed" -ge "$cfg_claude_min_seconds" ] || return 0
       hook_finished_body "$elapsed" "$cfg_claude_include_message"
-      hook_send "$hook_project 完了" white_check_mark "$REPLY"
+      hook_send_later "$cfg_claude_delay_seconds" finished '' "$hook_project 完了" white_check_mark "$REPLY"
       ;;
     Notification)
-      case $(hook_field '.notification_type // empty') in
+      type=$(hook_field '.notification_type // empty')
+      case $type in
         permission_prompt | elicitation_dialog | elicitation_url_dialog) ;;
         *) return 0 ;;
       esac
-      if ! load_valid_config; then
+      if ! load_valid_config || ! config_check_claude; then
         err "claude-hook: $problem"
         return 0
       fi
+      if [ "$type" = permission_prompt ] && [ -f "$hook_record.asker" ]; then
+        asker=$(cat "$hook_record.asker")
+        rm -f "$hook_record.asker"
+      fi
       hook_join_fields title message
-      hook_send "$hook_project 承認待ち" question "${REPLY:-Claude Code が応答を待っています}"
+      hook_send_later "$cfg_claude_delay_seconds" ask "$asker" \
+        "$hook_project 承認待ち" question "${REPLY:-Claude Code が応答を待っています}"
       ;;
     StopFailure)
+      hook_cancel ask ''
       if ! load_valid_config; then
         err "claude-hook: $problem"
         return 0
@@ -1685,28 +1804,47 @@ claude_hook_handle() {
 }
 
 codex_hook_handle() {
-  local event elapsed detail body nl=$'\n'
+  local event agent elapsed detail body nl=$'\n'
   hook_read_input codex-hook Codex || return 0
   event=$(hook_field '.hook_event_name // empty')
   case $event in
-    UserPromptSubmit | Stop | PermissionRequest | Interrupt) ;;
+    UserPromptSubmit | Stop | PermissionRequest | Interrupt | SessionEnd) ;;
+    PostToolUse)
+      hook_any_held codex ask || return 0
+      ;;
     *) return 0 ;;
   esac
+  agent=$(hook_field '.agent_id // empty')
   hook_identify "$(hook_field '.cwd // empty')" Codex codex
 
   case $event in
     UserPromptSubmit)
       # A subagent's prompt must not restart the main turn's clock.
-      [ -z "$(hook_field '.agent_id // empty')" ] || return 0
+      [ -z "$agent" ] || return 0
+      hook_cancel finished
+      hook_cancel ask
       hook_record_start
       ;;
     Interrupt)
-      # An interrupted turn never reaches Stop.
+      # An interrupted turn never reaches Stop. Esc or Ctrl-C on an approval
+      # prompt interrupts the turn too.
       hook_record_clear
+      hook_cancel finished
+      hook_cancel ask
+      ;;
+    SessionEnd)
+      hook_cancel finished
+      hook_cancel ask
+      ;;
+    PostToolUse)
+      # The agent has got past its prompt. Approving a command is only known
+      # here, once it has finished successfully.
+      hook_cancel ask "$agent"
       ;;
     Stop)
       [ "$(hook_field '.stop_hook_active // empty')" != true ] || return 0
-      [ -z "$(hook_field '.agent_id // empty')" ] || return 0
+      [ -z "$agent" ] || return 0
+      hook_cancel ask ''
       hook_take_elapsed || return 0
       elapsed=$REPLY
       if ! load_valid_config || ! config_check_codex; then
@@ -1715,7 +1853,7 @@ codex_hook_handle() {
       fi
       [ "$elapsed" -ge "$cfg_codex_min_seconds" ] || return 0
       hook_finished_body "$elapsed" "$cfg_codex_include_message"
-      hook_send "$hook_project 完了" white_check_mark "$REPLY"
+      hook_send_later "$cfg_codex_delay_seconds" finished '' "$hook_project 完了" white_check_mark "$REPLY"
       ;;
     PermissionRequest)
       # Reported for subagents too: the user is the one who has to approve.
@@ -1734,7 +1872,8 @@ codex_hook_handle() {
       hook_join_fields tool_name
       body=$REPLY
       [ -z "$detail" ] || body=${body:+$body$nl}$detail
-      hook_send "$hook_project 承認待ち" question "${body:-Codex が承認を待っています}"
+      hook_send_later "$cfg_codex_delay_seconds" ask "$agent" \
+        "$hook_project 承認待ち" question "${body:-Codex が承認を待っています}"
       ;;
   esac
   return 0
