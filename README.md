@@ -216,6 +216,7 @@ Claude Code のプラグインとして入れると、次のときに通知が�
 - 優先度はどれも 4（high）です。タグにはプロジェクト名とホスト名が付きます
 - プロジェクト名はディレクトリ名だけで、フルパスは送りません
 - サブエージェントの終了では通知しません
+- 「完了」と「承認待ち」は、しばらく応答がないときだけ送るようにもできます（[席を外しているときだけ通知する](#席を外しているときだけ通知する)）
 
 ### インストール
 
@@ -273,7 +274,7 @@ Codex CLI の hooks からも、次のときに通知が届きます。
 Claude Code 版との違いは次のとおりです。
 
 - エラーの通知はありません。Codex には、API エラーで止まったときのイベントがないためです
-- 承認待ちは、承認を求められた瞬間に届きます。Claude Code のような猶予がないので、画面の前にいても鳴ります。不要なら `PUSHME_CODEX_NOTIFY_PERMISSION=0` にしてください
+- 承認待ちは、承認を求められた瞬間に届きます。Claude Code のような猶予がないので、画面の前にいても鳴ります。`PUSHME_CODEX_DELAY_SECONDS` で遅らせるか（[席を外しているときだけ通知する](#席を外しているときだけ通知する)）、不要なら `PUSHME_CODEX_NOTIFY_PERMISSION=0` にしてください
 - サブエージェントの承認要求も通知します（承認するのは利用者のため）
 
 ### 設定方法
@@ -289,6 +290,34 @@ Claude Code 版との違いは次のとおりです。
    ```
 
 Codex の `config.toml` の `notify`（古い仕組み。ターンの完了しか通知できず、コマンドを 1 つしか登録できない）は使いません。
+
+## 席を外しているときだけ通知する
+
+`PUSHME_CLAUDE_DELAY_SECONDS`（Codex は `PUSHME_CODEX_DELAY_SECONDS`）を設定すると、「完了」と「承認待ち」の通知をその秒数だけ遅らせ、そのあいだに応答があれば送りません。画面の前にいるあいだは鳴らさず、離れているときだけ知らせたい場合に使います。既定は `0`（すぐ送る）です。
+
+```sh
+# 5 分たっても応答がなければ通知する
+PUSHME_CLAUDE_DELAY_SECONDS=300
+PUSHME_CODEX_DELAY_SECONDS=300
+```
+
+遅らせている通知は、次のときに取り消します。
+
+| 通知 | 取り消すとき |
+|---|---|
+| 完了 | 次のプロンプトを送ったとき、セッションを終えたとき |
+| 承認待ち | 承認を求めたエージェントのツールの実行が終わったとき、メインの会話のターンが終わったとき、次のプロンプトを送ったとき、セッションを終えたとき。Codex では Esc や Ctrl-C で中断したときも |
+
+- **承認したことは、ツールの実行が終わるまで分かりません。** 承認したコマンドが遅延の秒数より長く動くと、承認済みでも「承認待ち」が届きます
+- **Claude Code で承認を Esc や「No」（コメントなし）で断ると、それを知らせるイベントがありません。** そのまま離れると、遅延のあとに「承認待ち」が届きます。次のプロンプトを送れば取り消せます
+- Claude Code の承認待ちは、承認の画面が出て約 6 秒たってから数え始めます。Codex は承認を求められた時点からです
+- 遅らせているあいだに同じ種類の通知がまた来たら、新しいほうだけを送ります
+- サブエージェントの承認待ちは、ほかのエージェントがツールを使っても取り消しません
+- Claude Code のエラーの通知は遅らせません
+- おやすみ時間は、実際に送る時点の時刻で判定します
+- `--dry-run` では、遅らせずにすぐ表示します（何秒後に送るかも表示します）
+
+取り消しのために、Claude Code では `PermissionRequest`・`PostToolUse`・`PostToolUseFailure`・`SessionEnd`、Codex では `PostToolUse`・`SessionEnd` の hook も使います。プラグインは[更新](#更新)すれば入ります。プラグインを使わない場合と Codex では、examples の同じイベントの hook を追記してください（Codex は `/hooks` で信頼し直します）。`PostToolUse` はツールを使うたびに pushme を起動しますが、遅らせている通知がなければ、イベント名を読むだけで終わります。
 
 ## GitHub Actions から通知する
 
@@ -415,9 +444,11 @@ PUSHME_NTFY_TOPIC=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_NTFY_ATTACH_MAX` | `2097152` | 添付できるファイルの上限（バイト） |
 | `PUSHME_CLAUDE_MIN_SECONDS` | `30` | Claude Code の返答がこの秒数以上かかったときだけ「完了」を通知する |
 | `PUSHME_CLAUDE_INCLUDE_MESSAGE` | `1` | `0` にすると「完了」の通知に返答の先頭を載せない |
+| `PUSHME_CLAUDE_DELAY_SECONDS` | `0` | Claude Code の「完了」と「承認待ち」をこの秒数だけ遅らせ、そのあいだに応答があれば送らない（「席を外しているときだけ通知する」を参照） |
 | `PUSHME_CODEX_MIN_SECONDS` | `30` | Codex の返答がこの秒数以上かかったときだけ「完了」を通知する |
 | `PUSHME_CODEX_INCLUDE_MESSAGE` | `1` | `0` にすると Codex の「完了」の通知に返答の先頭を載せない |
 | `PUSHME_CODEX_NOTIFY_PERMISSION` | `1` | `0` にすると Codex の承認待ちを通知しない |
+| `PUSHME_CODEX_DELAY_SECONDS` | `0` | Codex の「完了」と「承認待ち」をこの秒数だけ遅らせ、そのあいだに応答があれば送らない |
 | `PUSHME_PUSHOVER_TOKEN` | なし | Pushover の API Token（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_USER` | なし | Pushover の User Key（`PUSHME_BACKEND=pushover` のとき必須） |
 | `PUSHME_PUSHOVER_DEVICE` | なし | 送る端末の名前（カンマ区切りで複数）。なければすべての端末 |

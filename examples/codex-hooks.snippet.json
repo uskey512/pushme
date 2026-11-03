@@ -11,6 +11,12 @@
     ],
     "Interrupt": [
       { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 3, "async": true } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 10, "async": true } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "\"$HOME/.local/bin/pushme\" codex-hook", "timeout": 3, "async": true } ] }
     ]
   }
 }

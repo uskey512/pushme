@@ -4,20 +4,31 @@ load helpers/common.sh
 
 SESSION=019a1b2c-3d4e-7f80-9a1b-2c3d4e5f6a7b
 
+# fd 3 is closed because bats waits for every process holding it, and a
+# held-back notification's process outlives the hook.
 hook() {
   local fixture=$1
   shift
-  run --separate-stderr pushme codex-hook "$@" <"$FIXTURES/codex/$fixture.json"
+  run --separate-stderr pushme codex-hook "$@" <"$FIXTURES/codex/$fixture.json" 3>&-
 }
 
 # Runs the hook with a fixture whose fields are changed by the jq filter $2.
 hook_with() {
   jq "$2" "$FIXTURES/codex/$1.json" >"$BATS_TEST_TMPDIR/event.json"
-  run --separate-stderr pushme codex-hook <"$BATS_TEST_TMPDIR/event.json"
+  run --separate-stderr pushme codex-hook <"$BATS_TEST_TMPDIR/event.json" 3>&-
 }
 
 state_dir() {
   printf '%s/pushme/codex' "$XDG_STATE_HOME"
+}
+
+# Number of notifications of kind $1 held back for the session.
+held() {
+  local file n=0
+  for file in "$(state_dir)/$SESSION.$1".*; do
+    [ -f "$file" ] && n=$((n + 1))
+  done
+  echo "$n"
 }
 
 started_ago() {
@@ -203,6 +214,108 @@ assert_quiet_success() {
   PUSHME_CODEX_NOTIFY_PERMISSION=0 hook permission-request
   assert_quiet_success
   [ "$(curl_calls)" -eq 0 ]
+}
+
+# --- held back (PUSHME_CODEX_DELAY_SECONDS) -----------------------------------------------
+
+@test "codex-hook: with a delay, an unanswered PermissionRequest is reported afterwards" {
+  use_env_topic
+  export PUSHME_CODEX_DELAY_SECONDS=1
+  hook permission-request
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(held ask)" -eq 1 ]
+  wait_for_calls 1
+  [ "$(sent_header_text X-Title)" = "my-project 承認待ち" ]
+  [ "$(cat "$(sent body)")" = "$(printf 'Bash\nrm -rf build && npm test')" ]
+  [ "$(held ask)" -eq 0 ]
+}
+
+@test "codex-hook: with a delay, a finished turn waits and is dropped once the user writes again" {
+  use_env_topic
+  write_config "PUSHME_CODEX_DELAY_SECONDS=1"
+  started_ago 60
+  hook stop
+  assert_quiet_success
+  [ "$(held finished)" -eq 1 ]
+  hook user-prompt-submit
+  [ "$(held finished)" -eq 0 ]
+  started_ago 200
+  hook stop
+  [ "$(curl_calls)" -eq 0 ]
+  wait_for_calls 1
+  [ "$(sent_header_text X-Title)" = "my-project 完了" ]
+  sleep 1
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "codex-hook: only the asking agent's finished tool call cancels its request" {
+  use_env_topic
+  export PUSHME_CODEX_DELAY_SECONDS=100
+  hook_with permission-request '.agent_id = "agent-def456"'
+  hook post-tool-use
+  [ "$(held ask)" -eq 1 ]
+  hook stop
+  [ "$(held ask)" -eq 1 ]
+  hook_with post-tool-use '.agent_id = "agent-def456"'
+  assert_quiet_success
+  [ "$(held ask)" -eq 0 ]
+  hook permission-request
+  hook_with post-tool-use '.agent_id = "agent-def456"'
+  [ "$(held ask)" -eq 1 ]
+  hook stop
+  [ "$(held ask)" -eq 0 ]
+}
+
+@test "codex-hook: Interrupt, UserPromptSubmit and SessionEnd cancel everything held back" {
+  use_env_topic
+  export PUSHME_CODEX_DELAY_SECONDS=100
+  local event
+  for event in interrupt user-prompt-submit session-end; do
+    started_ago 60
+    hook stop
+    hook_with permission-request '.agent_id = "agent-def456"'
+    [ "$(held finished)" -eq 1 ] && [ "$(held ask)" -eq 1 ]
+    hook "$event"
+    assert_quiet_success
+    [ "$(held finished)" -eq 0 ] && [ "$(held ask)" -eq 0 ]
+  done
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "codex-hook: a subagent's UserPromptSubmit cancels nothing" {
+  use_env_topic
+  export PUSHME_CODEX_DELAY_SECONDS=100
+  hook permission-request
+  hook_with user-prompt-submit '.agent_id = "agent-def456"'
+  [ "$(held ask)" -eq 1 ]
+}
+
+@test "codex-hook: tool calls with nothing held back leave no trace" {
+  use_env_topic
+  hook post-tool-use
+  assert_quiet_success
+  [ ! -e "$(state_dir)" ]
+}
+
+@test "codex-hook: --dry-run with a delay says when it would send" {
+  use_env_topic
+  PUSHME_CODEX_DELAY_SECONDS=300 hook permission-request --dry-run
+  assert_quiet_success
+  [[ $stderr == *"300 秒後、それまでに応答がなければ送ります"* ]]
+  [[ $stderr == *"X-Title: my-project 承認待ち"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "codex-hook: an invalid PUSHME_CODEX_DELAY_SECONDS is logged and reported by doctor" {
+  use_env_topic
+  export PUSHME_CODEX_DELAY_SECONDS=-1
+  hook permission-request
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  [[ $(cat "$ERROR_LOG") == *"PUSHME_CODEX_DELAY_SECONDS"* ]]
+  run -1 pushme doctor </dev/null
+  [[ $output == *"[NG] PUSHME_CODEX_DELAY_SECONDS"* ]]
 }
 
 # --- general ----------------------------------------------------------------------------

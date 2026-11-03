@@ -14,6 +14,18 @@
     ],
     "StopFailure": [
       { "hooks": [ { "type": "command", "command": "/path/to/pushme/bin/pushme claude-hook", "async": true, "timeout": 30 } ] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [ { "type": "command", "command": "/path/to/pushme/bin/pushme claude-hook", "async": true, "timeout": 10 } ] }
+    ],
+    "PostToolUse": [
+      { "hooks": [ { "type": "command", "command": "/path/to/pushme/bin/pushme claude-hook", "async": true, "timeout": 10 } ] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [ { "type": "command", "command": "/path/to/pushme/bin/pushme claude-hook", "async": true, "timeout": 10 } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "/path/to/pushme/bin/pushme claude-hook", "async": true, "timeout": 10 } ] }
     ]
   }
 }

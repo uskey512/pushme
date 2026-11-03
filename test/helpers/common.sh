@@ -20,9 +20,10 @@ setup() {
   mkdir -p "$HOME"
   unset PUSHME_CONFIG PUSHME_BACKEND PUSHME_NTFY_URL PUSHME_NTFY_TOPIC \
     PUSHME_NTFY_TOKEN PUSHME_HOSTNAME PUSHME_TIMEOUT PUSHME_NTFY_ATTACH_MAX \
-    PUSHME_CLAUDE_MIN_SECONDS PUSHME_CLAUDE_INCLUDE_MESSAGE CLAUDE_PROJECT_DIR \
-    PUSHME_PUSHOVER_TOKEN PUSHME_PUSHOVER_USER PUSHME_PUSHOVER_DEVICE \
+    PUSHME_CLAUDE_MIN_SECONDS PUSHME_CLAUDE_INCLUDE_MESSAGE PUSHME_CLAUDE_DELAY_SECONDS \
+    CLAUDE_PROJECT_DIR PUSHME_PUSHOVER_TOKEN PUSHME_PUSHOVER_USER PUSHME_PUSHOVER_DEVICE \
     PUSHME_CODEX_MIN_SECONDS PUSHME_CODEX_INCLUDE_MESSAGE PUSHME_CODEX_NOTIFY_PERMISSION \
+    PUSHME_CODEX_DELAY_SECONDS \
     PUSHME_DND PUSHME_DND_MODE PUSHME_DND_TZ PUSHME_TEST_NOW \
     FAKE_CURL_EXITS FAKE_CURL_STATUS FAKE_CURL_BODY FAKE_CURL_STDERR
   export PUSHME_CURL=$PUSHME_ROOT/test/helpers/fake-curl.sh
@@ -53,6 +54,16 @@ write_config() {
 
 curl_calls() {
   if [ -f "$FAKE_CURL_DIR/calls" ]; then cat "$FAKE_CURL_DIR/calls"; else echo 0; fi
+}
+
+# Waits up to 10 seconds for the fake curl to have been called $1 times.
+wait_for_calls() {
+  local i=0
+  while [ "$(curl_calls)" -lt "$1" ]; do
+    [ "$i" -lt 100 ] || return 1
+    sleep 0.1
+    i=$((i + 1))
+  done
 }
 
 # Path of a file recorded by the latest fake curl call (url, headers, body, args, config).
