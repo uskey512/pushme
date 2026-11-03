@@ -210,7 +210,7 @@ Claude Code のプラグインとして入れると、次のときに通知が�
 | タイミング | タイトル | 本文 |
 |---|---|---|
 | 返答が終わったとき（`PUSHME_CLAUDE_MIN_SECONDS` 秒以上かかったときだけ） | `<プロジェクト名> 完了` ✅ | 所要時間、セッション ID の先頭 8 文字、返答の先頭 300 文字 |
-| 操作の承認や入力を待っているとき | `<プロジェクト名> 承認待ち` ❓ | Claude Code の通知文 |
+| 操作の承認や入力を待っているとき | `<プロジェクト名> 承認待ち` ❓ | Claude Code の通知文。コマンドの実行の承認なら、そのコマンドの先頭 300 文字も |
 | API エラーで止まったとき | `<プロジェクト名> エラー` ❌ | エラーの種類と詳細 |
 
 - 優先度はどれも 4（high）です。タグにはプロジェクト名とホスト名が付きます
@@ -234,7 +234,7 @@ Claude Code のセッションの中からは次のように入れます（`/plu
 /plugin install pushme --marketplace uskey512/pushme
 ```
 
-プラグインは同梱の `bin/pushme` を使うので、`make install` していなくても動きます。設定は `~/.config/pushme/config` を共有します。返答を通知に載せたくない、短い作業でも通知したい、といった調整は `PUSHME_CLAUDE_INCLUDE_MESSAGE` と `PUSHME_CLAUDE_MIN_SECONDS`（「設定」の表を参照）で行います。
+プラグインは同梱の `bin/pushme` を使うので、`make install` していなくても動きます。設定は `~/.config/pushme/config` を共有します。返答やコマンドを通知に載せたくない、短い作業でも通知したい、といった調整は `PUSHME_CLAUDE_INCLUDE_MESSAGE`・`PUSHME_CLAUDE_INCLUDE_COMMAND`・`PUSHME_CLAUDE_MIN_SECONDS`（「設定」の表を参照）で行います。
 
 ### 更新
 
@@ -444,6 +444,7 @@ PUSHME_NTFY_TOPIC=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 | `PUSHME_NTFY_ATTACH_MAX` | `2097152` | 添付できるファイルの上限（バイト） |
 | `PUSHME_CLAUDE_MIN_SECONDS` | `30` | Claude Code の返答がこの秒数以上かかったときだけ「完了」を通知する |
 | `PUSHME_CLAUDE_INCLUDE_MESSAGE` | `1` | `0` にすると「完了」の通知に返答の先頭を載せない |
+| `PUSHME_CLAUDE_INCLUDE_COMMAND` | `1` | `0` にすると「承認待ち」の通知に実行しようとしているコマンドを載せない |
 | `PUSHME_CLAUDE_DELAY_SECONDS` | `0` | Claude Code の「完了」と「承認待ち」をこの秒数だけ遅らせ、そのあいだに応答があれば送らない（「席を外しているときだけ通知する」を参照） |
 | `PUSHME_CODEX_MIN_SECONDS` | `30` | Codex の返答がこの秒数以上かかったときだけ「完了」を通知する |
 | `PUSHME_CODEX_INCLUDE_MESSAGE` | `1` | `0` にすると Codex の「完了」の通知に返答の先頭を載せない |
@@ -463,7 +464,7 @@ PUSHME_NTFY_TOPIC=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 - **トピック名はパスワードと同じです。** 知っている人は誰でもあなたの端末に通知を送れますし、購読すれば通知の内容を読めます。リポジトリ、スクリプト、チャットに書かないでください。漏れたときは `pushme init --force` で作り直し、アプリの購読も新しいトピック名に切り替えてください
 - **秘密情報を通知に入れないでください。** ntfy.sh にはメッセージが平文で 12 時間残ります。パスワード、トークン、個人情報などは送らないでください
-- Claude Code と Codex の「完了」の通知には返答の先頭 300 文字が、Codex の「承認待ち」の通知には実行しようとしているコマンドが入ります。これらも ntfy.sh に平文で 12 時間残るので、機密が含まれうる場合は `PUSHME_CLAUDE_INCLUDE_MESSAGE=0`・`PUSHME_CODEX_INCLUDE_MESSAGE=0`・`PUSHME_CODEX_NOTIFY_PERMISSION=0` にしてください
+- Claude Code と Codex の「完了」の通知には返答の先頭 300 文字が、「承認待ち」の通知には実行しようとしているコマンドが入ります。これらも ntfy.sh に平文で 12 時間残るので、機密が含まれうる場合は `PUSHME_CLAUDE_INCLUDE_MESSAGE=0`・`PUSHME_CLAUDE_INCLUDE_COMMAND=0`・`PUSHME_CODEX_INCLUDE_MESSAGE=0`・`PUSHME_CODEX_NOTIFY_PERMISSION=0` にしてください
 - **無料枠は 1 日 250 通です。** ループの中から大量に送らないでください。制限を超え続けると、IP アドレスが一時的に止められることがあります
 - pushme は、エラーメッセージ・ログ・`--dry-run` の出力でトピック名とトークンを伏せ字にします。curl にはコマンドライン引数ではなく標準入力で渡すので、`ps` の表示にも出ません
 

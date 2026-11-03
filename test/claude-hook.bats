@@ -163,6 +163,56 @@ assert_quiet_success() {
   [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nClaude needs your permission to use Bash')" ]
 }
 
+@test "claude-hook: a permission prompt carries the command of the PermissionRequest before it" {
+  use_env_topic
+  hook permission-request
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  hook notification-permission
+  assert_quiet_success
+  [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nClaude needs your permission to use Bash\nrm -rf build && npm test')" ]
+  [ ! -e "$(state_dir)/$SESSION.asker" ]
+}
+
+@test "claude-hook: a long command is cut to 300 characters, and a tool without one adds nothing" {
+  use_env_topic
+  hook_with permission-request ".tool_input.command = \"$(repeat x 400)\""
+  hook notification-permission
+  [ "$(tail -n 1 "$(sent body)")" = "$(repeat x 300)…" ]
+  hook_with permission-request '.tool_name = "Edit" | .tool_input = {"file_path": "/home/someone/src/my-project/a.js", "old_string": "a", "new_string": "b"}'
+  hook_with notification-permission '.message = "Claude needs your permission to use Edit"'
+  assert_quiet_success
+  [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nClaude needs your permission to use Edit')" ]
+}
+
+@test "claude-hook: PUSHME_CLAUDE_INCLUDE_COMMAND=0 leaves the command out" {
+  use_env_topic
+  export PUSHME_CLAUDE_INCLUDE_COMMAND=0
+  hook permission-request
+  hook notification-permission
+  assert_quiet_success
+  [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nClaude needs your permission to use Bash')" ]
+}
+
+@test "claude-hook: the command of a PermissionRequest is not carried to an elicitation dialog" {
+  use_env_topic
+  hook permission-request
+  hook_with notification-permission '.notification_type = "elicitation_dialog"'
+  assert_quiet_success
+  [ "$(cat "$(sent body)")" = "$(printf 'Permission needed\nClaude needs your permission to use Bash')" ]
+}
+
+@test "claude-hook: an invalid PUSHME_CLAUDE_INCLUDE_COMMAND is logged and reported by doctor" {
+  use_env_topic
+  export PUSHME_CLAUDE_INCLUDE_COMMAND=yes
+  hook notification-permission
+  assert_quiet_success
+  [ "$(curl_calls)" -eq 0 ]
+  [[ $(cat "$ERROR_LOG") == *"PUSHME_CLAUDE_INCLUDE_COMMAND"* ]]
+  run -1 pushme doctor </dev/null
+  [[ $output == *"[NG] PUSHME_CLAUDE_INCLUDE_MESSAGE と PUSHME_CLAUDE_INCLUDE_COMMAND"* ]]
+}
+
 @test "claude-hook: elicitation dialogs are reported too" {
   use_env_topic
   local type

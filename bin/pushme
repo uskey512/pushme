@@ -319,6 +319,7 @@ cfg_reset() {
   cfg_ntfy_attach_max=
   cfg_claude_min_seconds=
   cfg_claude_include_message=
+  cfg_claude_include_command=
   cfg_claude_delay_seconds=
   cfg_codex_min_seconds=
   cfg_codex_include_message=
@@ -364,6 +365,7 @@ config_read_file() {
       PUSHME_NTFY_ATTACH_MAX) cfg_ntfy_attach_max=$value ;;
       PUSHME_CLAUDE_MIN_SECONDS) cfg_claude_min_seconds=$value ;;
       PUSHME_CLAUDE_INCLUDE_MESSAGE) cfg_claude_include_message=$value ;;
+      PUSHME_CLAUDE_INCLUDE_COMMAND) cfg_claude_include_command=$value ;;
       PUSHME_CLAUDE_DELAY_SECONDS) cfg_claude_delay_seconds=$value ;;
       PUSHME_CODEX_MIN_SECONDS) cfg_codex_min_seconds=$value ;;
       PUSHME_CODEX_INCLUDE_MESSAGE) cfg_codex_include_message=$value ;;
@@ -390,6 +392,7 @@ config_read_env() {
   if [ -n "${PUSHME_NTFY_ATTACH_MAX:-}" ]; then cfg_ntfy_attach_max=$PUSHME_NTFY_ATTACH_MAX; fi
   if [ -n "${PUSHME_CLAUDE_MIN_SECONDS:-}" ]; then cfg_claude_min_seconds=$PUSHME_CLAUDE_MIN_SECONDS; fi
   if [ -n "${PUSHME_CLAUDE_INCLUDE_MESSAGE:-}" ]; then cfg_claude_include_message=$PUSHME_CLAUDE_INCLUDE_MESSAGE; fi
+  if [ -n "${PUSHME_CLAUDE_INCLUDE_COMMAND:-}" ]; then cfg_claude_include_command=$PUSHME_CLAUDE_INCLUDE_COMMAND; fi
   if [ -n "${PUSHME_CLAUDE_DELAY_SECONDS:-}" ]; then cfg_claude_delay_seconds=$PUSHME_CLAUDE_DELAY_SECONDS; fi
   if [ -n "${PUSHME_CODEX_MIN_SECONDS:-}" ]; then cfg_codex_min_seconds=$PUSHME_CODEX_MIN_SECONDS; fi
   if [ -n "${PUSHME_CODEX_INCLUDE_MESSAGE:-}" ]; then cfg_codex_include_message=$PUSHME_CODEX_INCLUDE_MESSAGE; fi
@@ -446,6 +449,7 @@ load_config() {
   : "${cfg_backend:=ntfy}" "${cfg_ntfy_url:=$NTFY_DEFAULT_URL}" "${cfg_timeout:=10}" "${cfg_curl:=curl}"
   : "${cfg_ntfy_attach_max:=$NTFY_ATTACH_MAX_DEFAULT}"
   : "${cfg_claude_min_seconds:=30}" "${cfg_claude_include_message:=1}" "${cfg_claude_delay_seconds:=0}"
+  : "${cfg_claude_include_command:=1}"
   : "${cfg_codex_min_seconds:=30}" "${cfg_codex_include_message:=1}" "${cfg_codex_notify_permission:=1}"
   : "${cfg_codex_delay_seconds:=0}"
   : "${cfg_dnd_mode:=skip}"
@@ -493,10 +497,10 @@ config_check_claude() {
       return 1
       ;;
   esac
-  case $cfg_claude_include_message in
-    0 | 1) ;;
+  case $cfg_claude_include_message:$cfg_claude_include_command in
+    [01]:[01]) ;;
     *)
-      problem="PUSHME_CLAUDE_INCLUDE_MESSAGE は 0 か 1 にしてください"
+      problem="PUSHME_CLAUDE_INCLUDE_MESSAGE と PUSHME_CLAUDE_INCLUDE_COMMAND は 0 か 1 にしてください"
       return 1
       ;;
   esac
@@ -1718,7 +1722,7 @@ hook_any_held() {
 }
 
 claude_hook_handle() {
-  local event agent type asker='' elapsed
+  local event agent type asker='' detail='' body elapsed nl=$'\n'
   hook_read_input claude-hook "Claude Code" || return 0
   event=$(hook_field '.hook_event_name // empty')
   case $event in
@@ -1749,8 +1753,13 @@ claude_hook_handle() {
       hook_cancel ask
       ;;
     PermissionRequest)
-      # For the permission_prompt Notification that follows.
-      hook_make_state_dir && printf '%s' "$agent" >"$hook_record.asker"
+      # For the permission_prompt Notification that follows: the asking agent
+      # on the first line, then the command, kept whatever
+      # PUSHME_CLAUDE_INCLUDE_COMMAND says (the transcript holds it anyway).
+      hook_make_state_dir || return 0
+      detail=$(hook_field '.tool_input.command | strings
+        | if length > 300 then .[:300] + "…" else . end')
+      printf '%s\n%s' "$agent" "$detail" >"$hook_record.asker"
       ;;
     PostToolUse | PostToolUseFailure)
       # The agent has got past its prompt. Approving a tool is only known
@@ -1783,12 +1792,17 @@ claude_hook_handle() {
         return 0
       fi
       if [ "$type" = permission_prompt ] && [ -f "$hook_record.asker" ]; then
-        asker=$(cat "$hook_record.asker")
+        {
+          IFS= read -r asker
+          detail=$(cat)
+        } <"$hook_record.asker"
         rm -f "$hook_record.asker"
       fi
       hook_join_fields title message
+      body=$REPLY
+      [ "$cfg_claude_include_command" = 0 ] || [ -z "$detail" ] || body=${body:+$body$nl}$detail
       hook_send_later "$cfg_claude_delay_seconds" ask "$asker" \
-        "$hook_project 承認待ち" question "${REPLY:-Claude Code が応答を待っています}"
+        "$hook_project 承認待ち" question "${body:-Claude Code が応答を待っています}"
       ;;
     StopFailure)
       hook_cancel ask ''
