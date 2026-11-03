@@ -1651,7 +1651,33 @@ hook_message() {
 
 hook_send() {
   hook_message "$@"
-  deliver_message
+  hook_deliver_detached
+}
+
+# Sends msg_* from a process group of its own and returns at once: a
+# synchronous hook does not keep Claude Code waiting on the network, and
+# whatever stops the hook's group (claude -p kills the hooks still running
+# when it exits) leaves the send running. With delay $1 and file $2, sends
+# only if the file is still there after the delay. --dry-run prints at once.
+hook_deliver_detached() {
+  if [ "$opt_dry_run" = 1 ]; then
+    deliver_message
+    return
+  fi
+  set -m
+  (
+    trap '' HUP
+    if [ $# -gt 0 ]; then
+      sleep "$1"
+      # Only one of this process and hook_cancel manages to remove the file.
+      rm "$2" 2>/dev/null || exit 0
+    fi
+    deliver_message
+  ) </dev/null >/dev/null 2>&1 &
+  set +m
+  # PUSHME_TEST_WAIT_SEND lets the test suite check an immediate send as
+  # soon as the hook returns.
+  if [ $# -eq 0 ] && [ -n "${PUSHME_TEST_WAIT_SEND:-}" ]; then wait "$!"; fi
 }
 
 # A held-back notification is the file $hook_record.KIND.TOKEN plus a
@@ -1667,7 +1693,7 @@ hook_send_later() {
   shift 3
   hook_message "$@"
   if [ $((10#$delay)) -eq 0 ] || ! hook_make_state_dir; then
-    deliver_message
+    hook_deliver_detached
     return
   fi
   hook_cancel "$kind"
@@ -1678,20 +1704,10 @@ hook_send_later() {
   fi
   pending=$hook_record.$kind.$(date +%s).$$
   if ! printf '%s' "$agent" >"$pending"; then
-    deliver_message
+    hook_deliver_detached
     return
   fi
-  # A process group of its own, so that whatever stops the hook's group
-  # leaves it running.
-  set -m
-  (
-    trap '' HUP
-    sleep "$((10#$delay))"
-    # Only one of this process and hook_cancel manages to remove the file.
-    rm "$pending" 2>/dev/null || exit 0
-    deliver_message
-  ) </dev/null >/dev/null 2>&1 &
-  set +m
+  hook_deliver_detached "$((10#$delay))" "$pending"
 }
 
 # Removes the held-back notification of kind $1; with $2, only when its
