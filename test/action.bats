@@ -187,6 +187,15 @@ output_value() {
   [ "$(output_value dry-run-output)" = "pushme: dry-run: おやすみ時間（23:00-07:00）のため送りません" ]
 }
 
+@test "action: PUSHME_DND_MODE=defer on the step reports deferred" {
+  setup_action
+  export PUSHME_DND=23:00-07:00 PUSHME_DND_MODE=defer PUSHME_TEST_NOW=2330
+  run_action
+  [ "$status" -eq 0 ]
+  [ "$(sent_header X-Delay)" = 27000s ]
+  [ "$(output_value status)" = deferred ]
+}
+
 @test "action: works without GITHUB_OUTPUT" {
   setup_action
   unset GITHUB_OUTPUT

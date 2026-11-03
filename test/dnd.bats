@@ -142,6 +142,81 @@ check_at() {
   [ "$(curl_calls)" -eq 1 ]
 }
 
+# --- defer -----------------------------------------------------------------------------------
+
+@test "dnd: defer has ntfy deliver the message as the hours end, at its own priority" {
+  use_env_topic
+  export PUSHME_DND=23:00-07:00 PUSHME_DND_MODE=defer
+  PUSHME_TEST_NOW=233015 run --separate-stderr pushme -p high -T build hi </dev/null
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ "$stderr" = "pushme: おやすみ時間（23:00-07:00）のため、07:00 に届くよう予約しました" ]
+  [ "$(sent_header X-Delay)" = 26985s ]
+  [ "$(sent_header X-Priority)" = 4 ]
+  [ "$(sent_header X-Tags)" = build,testhost ]
+  [ "$(cat "$(sent body)")" = hi ]
+  PUSHME_TEST_NOW=233015 run --separate-stderr pushme -q hi </dev/null
+  [ -z "$stderr" ]
+  PUSHME_TEST_NOW=1200 run pushme -q hi </dev/null
+  run ! sent_header X-Delay
+  [ "$(curl_calls)" -eq 3 ]
+}
+
+@test "dnd: defer waits at least 15 seconds and goes on through ranges that follow each other" {
+  use_env_topic
+  export PUSHME_DND_MODE=defer
+  PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=065940 run pushme -q hi </dev/null
+  [ "$(sent_header X-Delay)" = 20s ]
+  PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=065950 run pushme -q hi </dev/null
+  [ "$(sent_header X-Delay)" = 15s ]
+  PUSHME_DND='22:00-00:00,0:00-07:00' PUSHME_TEST_NOW=2300 run --separate-stderr pushme hi </dev/null
+  [ "$stderr" = "pushme: おやすみ時間（22:00-00:00）のため、07:00 に届くよう予約しました" ]
+  [ "$(sent_header X-Delay)" = 28800s ]
+  PUSHME_DND='23:00-02:00,01:00-07:30,12:00-13:00' PUSHME_TEST_NOW=2330 run pushme -q hi </dev/null
+  [ "$(sent_header X-Delay)" = 28800s ]
+}
+
+@test "dnd: defer sends nothing when the hours cover the whole day" {
+  use_env_topic
+  PUSHME_DND='00:00-12:00,12:00-00:00' PUSHME_DND_MODE=defer PUSHME_TEST_NOW=2300 \
+    run --separate-stderr pushme hi </dev/null
+  [ "$status" -eq 0 ]
+  [ "$stderr" = "pushme: おやすみ時間（12:00-00:00）のため送りませんでした" ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "dnd: defer leaves out an attachment that ntfy.sh would delete before delivery" {
+  use_env_topic
+  export PUSHME_DND='20:00-23:00,12:00-13:00' PUSHME_DND_MODE=defer
+  local file=$BATS_TEST_TMPDIR/build.log
+  printf 'log\n' >"$file"
+  PUSHME_TEST_NOW=2000 run pushme -q -a "$file" hi </dev/null
+  [ "$status" -eq 0 ]
+  [ "$(sent_header X-Delay)" = 10800s ]
+  [ "$(cat "$(sent method)")" = PUT ]
+  [ "$(sent_header Filename)" = build.log ]
+  PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=2330 run --separate-stderr pushme -a "$file" hi </dev/null
+  [ "$status" -eq 0 ]
+  [[ $stderr == *"pushme: 警告: 添付ファイル build.log は"* ]] || false
+  [ "$(sent_header X-Delay)" = 27000s ]
+  [ "$(cat "$(sent method)")" = POST ]
+  [ "$(cat "$(sent body)")" = "$(printf 'hi\n\n添付ファイル build.log は、届くまでに ntfy.sh の保存期間（3 時間）を過ぎるため送っていません')" ]
+  run ! sent_header Filename
+}
+
+@test "dnd: with Pushover, defer sends at priority 1 as quiet does, and doctor says so" {
+  export PUSHME_BACKEND=pushover PUSHME_PUSHOVER_TOKEN=atesttokentesttokentesttokenab
+  export PUSHME_PUSHOVER_USER=usertestusertestusertestuserab PUSHME_HOSTNAME=testhost
+  export PUSHME_DND=23:00-07:00 PUSHME_DND_MODE=defer PUSHME_TEST_NOW=0100
+  run pushme -p high hi </dev/null
+  [ "$status" -eq 0 ]
+  [ "$(cat "$(sent form-priority)")" = -2 ]
+  run pushme --dry-run hi </dev/null
+  [[ $output == "おやすみ時間（23:00-07:00）: Pushover は配信を予約できないため、優先度 1 で送ります"$'\n'* ]] || false
+  run pushme doctor </dev/null
+  [[ $output == *"[!!] おやすみ時間: Pushover は配信を予約できないため、defer は quiet と同じく優先度 1 で送ります"* ]] || false
+}
+
 # --- run and hooks ---------------------------------------------------------------------------
 
 @test "dnd: run keeps the command's exit code when nothing is sent" {
@@ -155,6 +230,11 @@ check_at() {
   PUSHME_DND_MODE=quiet run pushme run -- false </dev/null
   [ "$status" -eq 1 ]
   [ "$(sent_header X-Priority)" = 1 ]
+  PUSHME_DND_MODE=defer run --separate-stderr pushme run -- sh -c 'exit 3' </dev/null
+  [ "$status" -eq 3 ]
+  [ "$(sent_header X-Delay)" = 21600s ]
+  [[ $stderr == *"おやすみ時間（23:00-07:00）のため、07:00 に届くよう予約しました"* ]] || false
+  [[ $stderr != *"通知を送りました"* ]] || false
 }
 
 @test "dnd: claude-hook holds notifications back but still records the start" {
@@ -203,6 +283,9 @@ check_at() {
   PUSHME_TEST_NOW=0100 PUSHME_DND_MODE=quiet run pushme --dry-run hi </dev/null
   [[ $output == "おやすみ時間（23:00-07:00）: 優先度 1 で送ります"$'\n'* ]] || false
   [[ $output == *$'\n'"X-Priority: 1"$'\n'* ]] || false
+  PUSHME_TEST_NOW=0100 PUSHME_DND_MODE=defer run pushme --dry-run hi </dev/null
+  [[ $output == "おやすみ時間（23:00-07:00）: 07:00 に届くよう予約して送ります"$'\n'* ]] || false
+  [[ $output == *$'\n'"X-Delay: 21600s"$'\n'* ]] || false
   PUSHME_TEST_NOW=0100 run pushme --dry-run -p urgent hi </dev/null
   [[ $output == "おやすみ時間（23:00-07:00）: 優先度 5 のため送ります"$'\n'* ]] || false
   PUSHME_TEST_NOW=0100 run pushme --dry-run --ignore-dnd hi </dev/null
