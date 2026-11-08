@@ -13,7 +13,7 @@ pushme run -- make test      # 終わったら成否・所要時間を通知
 - [コマンドの終了を、成否と所要時間つきで知らせる](#コマンドの終了を通知するrun)（[cron](#cron-で使う) にも）
 - [Claude Code](#claude-code-から通知する)・[Codex](#codex-から通知する) の返答の完了や承認待ちを知らせる（[席を外しているときだけ](#席を外しているときだけ通知する)にもできる）
 - [GitHub Actions](#github-actions-から通知する) のワークフローから知らせる
-- 決めた時間帯は送らない・音を鳴らさずに送る・時間帯が終わってから届ける（[DnD](#dnd)）
+- 決めた時間帯は送らない・音を鳴らさずに送る・時間帯が終わってから届ける（[DnD](#dnd)、Do Not Disturb）
 
 ## はじめに
 
@@ -442,7 +442,7 @@ GitHub Actions では `backend: pushover` と、`pushover-token: ${{ secrets.PUS
 
 ## DnD
 
-DnD（Do Not Disturb）の時間帯を決めると、そのあいだは通知を送らない、音を鳴らさずに送る、または時間帯が終わってから届ける、のどれかにできます。`send`・`run`・Claude Code・Codex・GitHub Actions のどこから送る場合にも、Pushover で受け取る場合にも効きます。
+DnD の時間帯を決めると、そのあいだは通知を送らない、音を鳴らさずに送る、または時間帯が終わってから届ける、のどれかにできます。`send`・`run`・Claude Code・Codex・GitHub Actions のどこから送る場合にも、Pushover で受け取る場合にも効きます。
 
 ```sh
 # 設定ファイルに書く
