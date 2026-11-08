@@ -85,7 +85,7 @@ jobs:
         run: |
           printf '%s\n' "$OUTPUT"
           case $OUTPUT in
-            *"おやすみ時間（${RANGE}）のため送りません"*) ;;
+            *"DnD（${RANGE}）のため送りません"*) ;;
             *) echo "::error::the message was not held back"; exit 1 ;;
           esac
 

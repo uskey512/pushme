@@ -83,7 +83,7 @@ check_at() {
   PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=2330 run --separate-stderr pushme hi </dev/null
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [ "$stderr" = "pushme: おやすみ時間（23:00-07:00）のため送りませんでした" ]
+  [ "$stderr" = "pushme: DnD（23:00-07:00）のため送りませんでした" ]
   [ "$(curl_calls)" -eq 0 ]
   PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=2330 run --separate-stderr pushme -q hi </dev/null
   [ -z "$stderr" ]
@@ -150,7 +150,7 @@ check_at() {
   PUSHME_TEST_NOW=233015 run --separate-stderr pushme -p high -T build hi </dev/null
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [ "$stderr" = "pushme: おやすみ時間（23:00-07:00）のため、07:00 に届くよう予約しました" ]
+  [ "$stderr" = "pushme: DnD（23:00-07:00）のため、07:00 に届くよう予約しました" ]
   [ "$(sent_header X-Delay)" = 26985s ]
   [ "$(sent_header X-Priority)" = 4 ]
   [ "$(sent_header X-Tags)" = build,testhost ]
@@ -170,7 +170,7 @@ check_at() {
   PUSHME_DND=23:00-07:00 PUSHME_TEST_NOW=065950 run pushme -q hi </dev/null
   [ "$(sent_header X-Delay)" = 15s ]
   PUSHME_DND='22:00-00:00,0:00-07:00' PUSHME_TEST_NOW=2300 run --separate-stderr pushme hi </dev/null
-  [ "$stderr" = "pushme: おやすみ時間（22:00-00:00）のため、07:00 に届くよう予約しました" ]
+  [ "$stderr" = "pushme: DnD（22:00-00:00）のため、07:00 に届くよう予約しました" ]
   [ "$(sent_header X-Delay)" = 28800s ]
   PUSHME_DND='23:00-02:00,01:00-07:30,12:00-13:00' PUSHME_TEST_NOW=2330 run pushme -q hi </dev/null
   [ "$(sent_header X-Delay)" = 28800s ]
@@ -181,7 +181,7 @@ check_at() {
   PUSHME_DND='00:00-12:00,12:00-00:00' PUSHME_DND_MODE=defer PUSHME_TEST_NOW=2300 \
     run --separate-stderr pushme hi </dev/null
   [ "$status" -eq 0 ]
-  [ "$stderr" = "pushme: おやすみ時間（12:00-00:00）のため送りませんでした" ]
+  [ "$stderr" = "pushme: DnD（12:00-00:00）のため送りませんでした" ]
   [ "$(curl_calls)" -eq 0 ]
 }
 
@@ -212,9 +212,9 @@ check_at() {
   [ "$status" -eq 0 ]
   [ "$(cat "$(sent form-priority)")" = -2 ]
   run pushme --dry-run hi </dev/null
-  [[ $output == "おやすみ時間（23:00-07:00）: Pushover は配信を予約できないため、優先度 1 で送ります"$'\n'* ]] || false
+  [[ $output == "DnD（23:00-07:00）: Pushover は配信を予約できないため、優先度 1 で送ります"$'\n'* ]] || false
   run pushme doctor </dev/null
-  [[ $output == *"[!!] おやすみ時間: Pushover は配信を予約できないため、defer は quiet と同じく優先度 1 で送ります"* ]] || false
+  [[ $output == *"[!!] DnD: Pushover は配信を予約できないため、defer は quiet と同じく優先度 1 で送ります"* ]] || false
 }
 
 # --- run and hooks ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ check_at() {
   run --separate-stderr pushme run -- sh -c 'exit 3' </dev/null
   [ "$status" -eq 3 ]
   [ "$(curl_calls)" -eq 0 ]
-  [[ $stderr == *"おやすみ時間（23:00-07:00）のため送りませんでした"* ]] || false
+  [[ $stderr == *"DnD（23:00-07:00）のため送りませんでした"* ]] || false
   [[ $stderr != *"通知を送りました"* ]] || false
   PUSHME_DND_MODE=quiet run pushme run -- false </dev/null
   [ "$status" -eq 1 ]
@@ -233,7 +233,7 @@ check_at() {
   PUSHME_DND_MODE=defer run --separate-stderr pushme run -- sh -c 'exit 3' </dev/null
   [ "$status" -eq 3 ]
   [ "$(sent_header X-Delay)" = 21600s ]
-  [[ $stderr == *"おやすみ時間（23:00-07:00）のため、07:00 に届くよう予約しました"* ]] || false
+  [[ $stderr == *"DnD（23:00-07:00）のため、07:00 に届くよう予約しました"* ]] || false
   [[ $stderr != *"通知を送りました"* ]] || false
 }
 
@@ -279,19 +279,19 @@ check_at() {
   use_env_topic
   export PUSHME_DND=23:00-07:00
   PUSHME_TEST_NOW=0100 run pushme --dry-run hi </dev/null
-  [[ $output == "pushme: dry-run: おやすみ時間（23:00-07:00）のため送りません" ]] || false
+  [[ $output == "pushme: dry-run: DnD（23:00-07:00）のため送りません" ]] || false
   PUSHME_TEST_NOW=0100 PUSHME_DND_MODE=quiet run pushme --dry-run hi </dev/null
-  [[ $output == "おやすみ時間（23:00-07:00）: 優先度 1 で送ります"$'\n'* ]] || false
+  [[ $output == "DnD（23:00-07:00）: 優先度 1 で送ります"$'\n'* ]] || false
   [[ $output == *$'\n'"X-Priority: 1"$'\n'* ]] || false
   PUSHME_TEST_NOW=0100 PUSHME_DND_MODE=defer run pushme --dry-run hi </dev/null
-  [[ $output == "おやすみ時間（23:00-07:00）: 07:00 に届くよう予約して送ります"$'\n'* ]] || false
+  [[ $output == "DnD（23:00-07:00）: 07:00 に届くよう予約して送ります"$'\n'* ]] || false
   [[ $output == *$'\n'"X-Delay: 21600s"$'\n'* ]] || false
   PUSHME_TEST_NOW=0100 run pushme --dry-run -p urgent hi </dev/null
-  [[ $output == "おやすみ時間（23:00-07:00）: 優先度 5 のため送ります"$'\n'* ]] || false
+  [[ $output == "DnD（23:00-07:00）: 優先度 5 のため送ります"$'\n'* ]] || false
   PUSHME_TEST_NOW=0100 run pushme --dry-run --ignore-dnd hi </dev/null
-  [[ $output == "おやすみ時間（23:00-07:00）: --ignore-dnd のため送ります"$'\n'* ]] || false
+  [[ $output == "DnD（23:00-07:00）: --ignore-dnd のため送ります"$'\n'* ]] || false
   PUSHME_TEST_NOW=1200 run pushme --dry-run hi </dev/null
-  [[ $output == "おやすみ時間: 対象外"$'\n'* ]] || false
+  [[ $output == "DnD: 対象外"$'\n'* ]] || false
   [ "$(curl_calls)" -eq 0 ]
 }
 
@@ -300,17 +300,17 @@ check_at() {
   export PUSHME_DND='23:00-07:00,12:00-13:00' PUSHME_DND_MODE=quiet PUSHME_DND_TZ=Asia/Tokyo
   PUSHME_TEST_NOW=1230 run pushme doctor </dev/null
   [ "$status" -eq 0 ]
-  [[ $output == *"[OK] おやすみ時間: 23:00-07:00,12:00-13:00（quiet、タイムゾーン Asia/Tokyo）"* ]] || false
-  [[ $output == *"[--] 現在はおやすみ時間中です（12:00-13:00）"* ]] || false
+  [[ $output == *"[OK] DnD: 23:00-07:00,12:00-13:00（quiet、タイムゾーン Asia/Tokyo）"* ]] || false
+  [[ $output == *"[--] 現在は DnD の時間帯です（12:00-13:00）"* ]] || false
   PUSHME_TEST_NOW=0800 run pushme doctor </dev/null
-  [[ $output == *"[--] 現在はおやすみ時間の対象外です"* ]] || false
+  [[ $output == *"[--] 現在は DnD の時間帯ではありません"* ]] || false
 }
 
 @test "dnd: doctor reports malformed settings and an unset DnD" {
   use_env_topic
   run pushme doctor </dev/null
   [ "$status" -eq 0 ]
-  [[ $output == *"[--] おやすみ時間: 設定なし"* ]] || false
+  [[ $output == *"[--] DnD: 設定なし"* ]] || false
   PUSHME_DND=23:00 run -1 pushme doctor </dev/null
   [[ $output == *"[NG] PUSHME_DND の形式が不正です: 23:00"* ]] || false
 }

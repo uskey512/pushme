@@ -62,7 +62,7 @@ send と run のオプション:
       --no-host          ホスト名タグを付けない
   -q, --quiet            成功時に何も表示しない（cron ではメールが届かないよう付ける）
       --dry-run          送信せず、送る内容を表示する（トピック名とトークンは伏せ字）
-      --ignore-dnd       おやすみ時間（PUSHME_DND）でも送る
+      --ignore-dnd       DnD の時間帯（PUSHME_DND）でも送る
 
 send:
   引数を空白でつないで本文にする。引数がなく標準入力が端末でなければ標準入力を読む。
@@ -1201,18 +1201,18 @@ deliver_message() {
       skip)
         dnd_held=1
         if [ "$opt_dry_run" = 1 ]; then
-          printf 'pushme: dry-run: おやすみ時間（%s）のため送りません\n' "$range"
+          printf 'pushme: dry-run: DnD（%s）のため送りません\n' "$range"
         elif [ "$opt_quiet" != 1 ]; then
-          printf 'pushme: おやすみ時間（%s）のため送りませんでした\n' "$range" >&2
+          printf 'pushme: DnD（%s）のため送りませんでした\n' "$range" >&2
         fi
         return 0
         ;;
       quiet)
         msg_priority=1
         if [ "$opt_dry_run" = 1 ] && [ "$cfg_dnd_mode" = defer ]; then
-          printf 'おやすみ時間（%s）: Pushover は配信を予約できないため、優先度 1 で送ります\n' "$range"
+          printf 'DnD（%s）: Pushover は配信を予約できないため、優先度 1 で送ります\n' "$range"
         elif [ "$opt_dry_run" = 1 ]; then
-          printf 'おやすみ時間（%s）: 優先度 1 で送ります\n' "$range"
+          printf 'DnD（%s）: 優先度 1 で送ります\n' "$range"
         fi
         ;;
       defer)
@@ -1220,22 +1220,22 @@ deliver_message() {
         ends=$(printf '%02d:%02d' $((ends / 60)) $((ends % 60)))
         msg_delay=$((REPLY * 60 - dnd_second))
         [ "$msg_delay" -ge "$NTFY_DELAY_MIN" ] || msg_delay=$NTFY_DELAY_MIN
-        if [ "$opt_dry_run" = 1 ]; then printf 'おやすみ時間（%s）: %s に届くよう予約して送ります\n' "$range" "$ends"; fi
+        if [ "$opt_dry_run" = 1 ]; then printf 'DnD（%s）: %s に届くよう予約して送ります\n' "$range" "$ends"; fi
         "backend_${cfg_backend}_send" || return 1
         dnd_held=1
         if [ "$opt_dry_run" != 1 ] && [ "$opt_quiet" != 1 ]; then
-          printf 'pushme: おやすみ時間（%s）のため、%s に届くよう予約しました\n' "$range" "$ends" >&2
+          printf 'pushme: DnD（%s）のため、%s に届くよう予約しました\n' "$range" "$ends" >&2
         fi
         return 0
         ;;
     esac
   elif [ "$opt_dry_run" = 1 ] && [ -n "$cfg_dnd" ]; then
     if [ -z "$range" ]; then
-      printf 'おやすみ時間: 対象外\n'
+      printf 'DnD: 対象外\n'
     elif [ "$opt_ignore_dnd" = 1 ]; then
-      printf 'おやすみ時間（%s）: --ignore-dnd のため送ります\n' "$range"
+      printf 'DnD（%s）: --ignore-dnd のため送ります\n' "$range"
     else
-      printf 'おやすみ時間（%s）: 優先度 5 のため送ります\n' "$range"
+      printf 'DnD（%s）: 優先度 5 のため送ります\n' "$range"
     fi
   fi
   "backend_${cfg_backend}_send"
@@ -2056,16 +2056,16 @@ cmd_doctor() {
   if ! config_check_dnd "$REPLY"; then
     doctor_report NG "$problem"
   elif [ -z "$cfg_dnd" ]; then
-    doctor_report -- "おやすみ時間: 設定なし"
+    doctor_report -- "DnD: 設定なし"
   else
-    doctor_report OK "おやすみ時間: ${cfg_dnd}（${cfg_dnd_mode}、タイムゾーン ${cfg_dnd_tz:-マシンのローカル時刻}）"
+    doctor_report OK "DnD: ${cfg_dnd}（${cfg_dnd_mode}、タイムゾーン ${cfg_dnd_tz:-マシンのローカル時刻}）"
     if [ "$cfg_dnd_mode" = defer ] && [ "$cfg_backend" != ntfy ]; then
-      doctor_report '!!' "おやすみ時間: Pushover は配信を予約できないため、defer は quiet と同じく優先度 1 で送ります"
+      doctor_report '!!' "DnD: Pushover は配信を予約できないため、defer は quiet と同じく優先度 1 で送ります"
     fi
     if [ -n "$dnd_range" ]; then
-      doctor_report -- "現在はおやすみ時間中です（${dnd_range}）"
+      doctor_report -- "現在は DnD の時間帯です（${dnd_range}）"
     else
-      doctor_report -- "現在はおやすみ時間の対象外です"
+      doctor_report -- "現在は DnD の時間帯ではありません"
     fi
   fi
 
