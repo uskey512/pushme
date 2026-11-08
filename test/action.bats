@@ -184,7 +184,7 @@ output_value() {
   [ "$(output_value status)" = skipped ]
   export INPUT_DRY_RUN=true
   run_action
-  [ "$(output_value dry-run-output)" = "pushme: dry-run: おやすみ時間（23:00-07:00）のため送りません" ]
+  [ "$(output_value dry-run-output)" = "pushme: dry-run: DnD（23:00-07:00）のため送りません" ]
 }
 
 @test "action: PUSHME_DND_MODE=defer on the step reports deferred" {

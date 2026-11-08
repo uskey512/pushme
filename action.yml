@@ -61,7 +61,7 @@ inputs:
 
 outputs:
   status:
-    description: sent / deferred（おやすみ時間が明けてから届くよう予約した）/ skipped（おやすみ時間で送らなかった）/ dry-run / failed のどれか
+    description: sent / deferred（DnD の時間帯が終わってから届くよう予約した）/ skipped（DnD の時間帯のため送らなかった）/ dry-run / failed のどれか
     value: ${{ steps.send.outputs.status }}
   dry-run-output:
     description: dry-run のときに表示した送信内容
